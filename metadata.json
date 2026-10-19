@@ -1,0 +1,6 @@
+{
+  "name": "FLORA — Interactive Hand-Gesture 3D Botanical Studio",
+  "description": "Control 3D flower blooming and switch across botanical species and interactive spatial environments using real-time ML hand gesture recognition and XR Blocks.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
