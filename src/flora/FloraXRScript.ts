@@ -33,7 +33,7 @@ declare global {
 export class FloraXRScript extends xb.Script {
   private readonly flowerModels = new Map<string, ProceduralFlowerModel>();
   private activeFlowerModel!: ProceduralFlowerModel;
-  private flowerStageViewer!: xb.ModelViewer;
+  private flowerStageGroup = new THREE.Group();
   private flowerPivotGroup = new THREE.Group();
   private environmentManager!: EnvironmentManager;
   private handOverlay!: HandTrackerOverlay;
@@ -77,15 +77,10 @@ export class FloraXRScript extends xb.Script {
     this.activeFlowerModel = this.flowerModels.get(FLOWER_LIBRARY[0].id)!;
     this.activeFlowerModel.visible = true;
 
-    this.flowerStageViewer = new xb.ModelViewer({
-      manipulation: true,
-      castShadow: true,
-      receiveShadow: true,
-    });
-    this.flowerStageViewer.name = 'BotanicalFlowerStage';
-    this.flowerStageViewer.setContent(this.flowerPivotGroup);
-    this.flowerStageViewer.position.set(0, 1.28, -1.08);
-    this.add(this.flowerStageViewer);
+    this.flowerStageGroup.name = 'BotanicalFlowerStage';
+    this.flowerStageGroup.position.set(0, 1.24, -1.08);
+    this.flowerStageGroup.add(this.flowerPivotGroup);
+    this.add(this.flowerStageGroup);
 
     this.buildSpatialUICard();
 
@@ -358,11 +353,12 @@ export class FloraXRScript extends xb.Script {
         const pitchX = this.pitchSpring.step(dt);
         const yawY = this.yawSpring.step(dt);
         const rollZ = this.rollSpring.step(dt);
+        this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
         this.activeFlowerModel.setBloom(b, performance.now() / 1000);
         this.flowerPivotGroup.scale.setScalar(s);
-        this.flowerPivotGroup.rotation.x = pitchX;
+        this.flowerPivotGroup.rotation.x = 0;
         this.flowerPivotGroup.rotation.y = yawY;
-        this.flowerPivotGroup.rotation.z = rollZ;
+        this.flowerPivotGroup.rotation.z = 0;
         this.handOverlay.updateRotationReadout(pitchX, yawY, rollZ);
         this.environmentManager.updateEnvironment(
           b,
@@ -530,11 +526,12 @@ export class FloraXRScript extends xb.Script {
     const currentYawY = this.yawSpring.step(dt);
     const currentRollZ = this.rollSpring.step(dt);
 
+    this.activeFlowerModel.setHeadOrientation(currentPitchX, currentRollZ);
     this.activeFlowerModel.setBloom(bloom01, elapsedSec);
     this.flowerPivotGroup.scale.setScalar(transitionScale);
-    this.flowerPivotGroup.rotation.x = currentPitchX;
+    this.flowerPivotGroup.rotation.x = 0;
     this.flowerPivotGroup.rotation.y = currentYawY;
-    this.flowerPivotGroup.rotation.z = currentRollZ;
+    this.flowerPivotGroup.rotation.z = 0;
 
     this.handOverlay.updateRotationReadout(
       currentPitchX,

@@ -10,6 +10,9 @@ import {
   SecondHandGestureDetector,
   FLOWER_LIBRARY,
   ENVIRONMENT_LIBRARY,
+  computeFloralShellEnvelope,
+  evaluateOrganPitchAtBloom,
+  evaluateStamenPitchAtBloom,
   type Point3D,
 } from './gestureMath.ts';
 
@@ -256,3 +259,82 @@ test('FLOWER_LIBRARY and ENVIRONMENT_LIBRARY contain complete 8-class botanical 
     assert.ok(flower.classZh.length > 0);
   }
 });
+
+test('computeFloralShellEnvelope and evaluateOrganPitchAtBloom guarantee strictly nested, non-intersecting shells (zero clipping / 不穿模) across all 8 species and all bloom states', () => {
+  const bloomSamples = [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+
+  for (const spec of FLOWER_LIBRARY) {
+    const env = computeFloralShellEnvelope(spec);
+
+    // 1. Concentric radial separation: Core/Stamens < Inner Petals < Outer Petals < Calyx Sepals < Companion Bud
+    if (spec.morphology !== 'sunflower-capitulum') {
+      assert.ok(
+        env.coreMaxRadius < env.stamenMinRadius,
+        `${spec.id}: coreMaxRadius (${env.coreMaxRadius}) must be < stamenMinRadius (${env.stamenMinRadius})`,
+      );
+    }
+    assert.ok(
+      env.stamenMaxRadius < env.petalMinRadius,
+      `${spec.id}: stamenMaxRadius (${env.stamenMaxRadius}) must be < petalMinRadius (${env.petalMinRadius}) so stamens never clip inner petals`,
+    );
+    assert.ok(
+      env.petalMinRadius < env.petalMaxRadius,
+      `${spec.id}: petalMinRadius < petalMaxRadius`,
+    );
+    assert.ok(
+      env.petalMaxRadius < env.sepalRadius,
+      `${spec.id}: petalMaxRadius (${env.petalMaxRadius}) must be < sepalRadius (${env.sepalRadius}) so outer petals never clip sepals`,
+    );
+    assert.ok(
+      env.companionBudPosition[0] > env.maxCorollaReachRadius + 0.04,
+      `${spec.id}: companionBud X (${env.companionBudPosition[0]}) must clear maxCorollaReachRadius (${env.maxCorollaReachRadius})`,
+    );
+
+    // 2. Angular shell separation at every bloom state b in [0, 1]
+    for (const b of bloomSamples) {
+      const outerStamenPitch = evaluateStamenPitchAtBloom(
+        env.stamenClosedPitchRange[1],
+        env.stamenOpenPitchRange[1],
+        b,
+      );
+      const innerPetalPitch = evaluateOrganPitchAtBloom(
+        env.petalClosedPitchRange[0],
+        env.petalOpenPitchRange[0],
+        0,
+        b,
+      );
+      const midPetalPitch = evaluateOrganPitchAtBloom(
+        (env.petalClosedPitchRange[0] + env.petalClosedPitchRange[1]) * 0.5,
+        (env.petalOpenPitchRange[0] + env.petalOpenPitchRange[1]) * 0.5,
+        0.5,
+        b,
+      );
+      const outerPetalPitch = evaluateOrganPitchAtBloom(
+        env.petalClosedPitchRange[1],
+        env.petalOpenPitchRange[1],
+        1.0,
+        b,
+      );
+      const sepalPitch = evaluateOrganPitchAtBloom(
+        env.sepalClosedPitch,
+        env.sepalOpenPitch,
+        -1,
+        b,
+      );
+
+      assert.ok(
+        outerStamenPitch < innerPetalPitch,
+        `${spec.id} @ b=${b}: outerStamenPitch (${outerStamenPitch}) must be < innerPetalPitch (${innerPetalPitch})`,
+      );
+      assert.ok(
+        innerPetalPitch < midPetalPitch && midPetalPitch < outerPetalPitch,
+        `${spec.id} @ b=${b}: petal whorls must be strictly monotonic (${innerPetalPitch} < ${midPetalPitch} < ${outerPetalPitch})`,
+      );
+      assert.ok(
+        outerPetalPitch < sepalPitch,
+        `${spec.id} @ b=${b}: outerPetalPitch (${outerPetalPitch}) must be < sepalPitch (${sepalPitch})`,
+      );
+    }
+  }
+});
+

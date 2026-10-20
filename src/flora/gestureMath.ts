@@ -1329,3 +1329,151 @@ export class SecondHandGestureDetector {
     return null;
   }
 }
+
+export interface BotanicalShellEnvelope {
+  coreMaxRadius: number;
+  stamenMinRadius: number;
+  stamenMaxRadius: number;
+  stamenClosedPitchRange: [number, number];
+  stamenOpenPitchRange: [number, number];
+  petalMinRadius: number;
+  petalMaxRadius: number;
+  petalTopY: number;
+  petalBottomY: number;
+  petalClosedPitchRange: [number, number];
+  petalOpenPitchRange: [number, number];
+  sepalRadius: number;
+  sepalY: number;
+  sepalClosedPitch: number;
+  sepalOpenPitch: number;
+  companionBudPosition: [number, number, number];
+  maxCorollaReachRadius: number;
+}
+
+/**
+ * Computes strictly nested, non-intersecting radial & angular shells for every organ
+ * of a flower species (Gynoecium < Stamens < Inner Petals < Outer Petals < Calyx Sepals < Companion Bud)
+ * so that meshes never self-intersect or clip ("不穿模") at any bloom state b in [0, 1].
+ */
+export function computeFloralShellEnvelope(
+  spec: FlowerSpec,
+): BotanicalShellEnvelope {
+  const morph = spec.morphology;
+  const isLotus = morph === 'lotus-pod';
+  const isSunflower = morph === 'sunflower-capitulum';
+  const isLily = morph === 'lily-recurved';
+
+  const coreMaxRadius = isSunflower ? 0.114 : isLotus ? 0.044 : 0.015;
+  const stamenMinRadius = isSunflower
+    ? 0.01
+    : isLotus
+      ? 0.047
+      : isLily
+        ? 0.018
+        : 0.018;
+  const stamenMaxRadius = isSunflower
+    ? 0.112
+    : isLotus
+      ? 0.056
+      : isLily
+        ? 0.022
+        : 0.028;
+
+  const petalMinRadius = isSunflower
+    ? 0.118
+    : isLotus
+      ? 0.062
+      : 0.034;
+  const petalMaxRadius = isSunflower
+    ? 0.138
+    : isLotus
+      ? 0.092
+      : 0.074;
+
+  const stamenClosedPitchRange: [number, number] = isLily
+    ? [0.06, 0.12]
+    : [0.08, 0.22];
+  const stamenOpenPitchRange: [number, number] = isLily
+    ? [0.34, 0.44]
+    : [0.32, 0.68];
+
+  const petalClosedPitchRange: [number, number] = isSunflower
+    ? [0.26, 0.48]
+    : [0.24, 0.52];
+  const petalOpenPitchRange: [number, number] = isSunflower
+    ? [spec.maxOpenAngleRad * 0.92, spec.maxOpenAngleRad * 1.06]
+    : [0.82, spec.maxOpenAngleRad];
+
+  const sepalRadius = petalMaxRadius + 0.009;
+  const sepalY = 0.004;
+  const sepalClosedPitch = petalClosedPitchRange[1] + 0.12;
+  const sepalOpenPitch = petalOpenPitchRange[1] + 0.2;
+
+  const maxCorollaReachRadius = petalMaxRadius + spec.petalLength * 1.05;
+  // Place companion bud well outside and below the full open petal reach envelope
+  const companionBudPosition: [number, number, number] = [
+    maxCorollaReachRadius + 0.055,
+    -0.12,
+    -0.065,
+  ];
+
+  return {
+    coreMaxRadius,
+    stamenMinRadius,
+    stamenMaxRadius,
+    stamenClosedPitchRange,
+    stamenOpenPitchRange,
+    petalMinRadius,
+    petalMaxRadius,
+    petalTopY: 0.033,
+    petalBottomY: 0.009,
+    petalClosedPitchRange,
+    petalOpenPitchRange,
+    sepalRadius,
+    sepalY,
+    sepalClosedPitch,
+    sepalOpenPitch,
+    companionBudPosition,
+    maxCorollaReachRadius,
+  };
+}
+
+/**
+ * Evaluates a strictly monotonic opening pitch angle for a petal or sepal at normalizedRank
+ * and bloom01 in [0, 1]. Higher normalizedRank (outer whorls) always open earlier and wider
+ * than lower normalizedRank (inner whorls), guaranteeing zero layer crossing.
+ */
+export function evaluateOrganPitchAtBloom(
+  closedPitch: number,
+  openPitch: number,
+  normalizedRank: number,
+  bloom01: number,
+): number {
+  const b = clamp(bloom01, 0, 1);
+  if (normalizedRank < 0) {
+    // Calyx sepal: opens earliest so outer petals never collide with sepals
+    const sepalP = clamp(b / 0.36, 0, 1);
+    const smoothS = sepalP * sepalP * (3 - 2 * sepalP);
+    return closedPitch + (openPitch - closedPitch) * smoothS;
+  }
+
+  const rank = clamp(normalizedRank, 0, 1);
+  // Outer petals (rank=1) start at b=0; innermost petals (rank=0) start at b=0.14
+  const startAt = (1 - rank) * 0.14;
+  const span = 1 - startAt;
+  const rawP = clamp((b - startAt) / Math.max(0.2, span), 0, 1);
+  const smoothP = rawP * rawP * (3 - 2 * rawP);
+  return closedPitch + (openPitch - closedPitch) * smoothP;
+}
+
+export function evaluateStamenPitchAtBloom(
+  closedPitch: number,
+  openPitch: number,
+  bloom01: number,
+): number {
+  const b = clamp(bloom01, 0, 1);
+  const stamenP = clamp((b - 0.12) / 0.88, 0, 1);
+  const smoothP = stamenP * stamenP * (3 - 2 * stamenP);
+  return closedPitch + (openPitch - closedPitch) * smoothP;
+}
+
