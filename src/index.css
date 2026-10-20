@@ -46,72 +46,74 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 22px 28px;
+  padding: 18px 24px;
 }
 
 .flora-top-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   width: 100%;
 }
 
 .flora-brand {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: 8px;
   pointer-events: auto;
+  flex-shrink: 0;
 }
 
 .flora-brand-mark {
   color: #e8b4b8;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .flora-brand-title {
   font-family: var(--font-serif);
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 600;
-  letter-spacing: 0.22em;
+  letter-spacing: 0.2em;
   color: #ffffff;
 }
 
 .flora-brand-sub {
-  font-size: 11px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgba(246, 243, 238, 0.56);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: rgba(246, 243, 238, 0.58);
+  white-space: nowrap;
 }
 
 .flora-env-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px;
-  background: rgba(16, 14, 22, 0.62);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  gap: 4px;
+  padding: 3px;
+  background: rgba(16, 14, 22, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   pointer-events: auto;
+  flex-shrink: 0;
 }
 
 .flora-env-btn {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 6px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 4px;
   color: rgba(246, 243, 238, 0.68);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   cursor: pointer;
   transition: all 0.18s ease;
   text-transform: none;
+  white-space: nowrap;
 }
 
 .flora-env-btn:hover {
@@ -128,6 +130,7 @@ body {
 .flora-env-dot {
   width: 7px;
   height: 7px;
+  flex-shrink: 0;
   border-radius: 50%;
   box-shadow: 0 0 8px currentColor;
 }
@@ -135,24 +138,25 @@ body {
 .flora-top-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   pointer-events: auto;
+  flex-shrink: 0;
 }
 
 .flora-action-btn {
-  padding: 7px 14px;
-  background: rgba(22, 19, 30, 0.72);
-  backdrop-filter: blur(12px);
+  padding: 5px 10px;
+  background: rgba(22, 19, 30, 0.84);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 4px;
   color: #f6f3ee;
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   cursor: pointer;
   transition: all 0.18s ease;
   text-transform: none;
+  white-space: nowrap;
 }
 
 .flora-action-btn:hover {
@@ -190,27 +194,41 @@ body {
 
 .flora-left-editorial {
   position: fixed;
-  left: 28px;
-  top: 70px;
-  width: 285px;
+  left: 24px;
+  top: 64px;
+  width: 292px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   pointer-events: none;
+}
+
+.flora-class-badge {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 2px 8px;
+  background: rgba(255, 209, 102, 0.14);
+  border: 1px solid rgba(255, 209, 102, 0.42);
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #ffd166;
+  letter-spacing: 0.05em;
 }
 
 .flora-index-tag {
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
   color: rgba(232, 180, 184, 0.88);
   text-transform: uppercase;
+  margin-top: 2px;
 }
 
 .flora-species-title-zh {
   margin: 0;
   font-family: var(--font-serif);
-  font-size: 36px;
+  font-size: 34px;
   font-weight: 600;
   line-height: 1.06;
   letter-spacing: 0.04em;
@@ -221,14 +239,14 @@ body {
 .flora-species-title-en {
   font-family: var(--font-serif);
   font-style: italic;
-  font-size: 15px;
+  font-size: 14.5px;
   color: rgba(246, 243, 238, 0.78);
   letter-spacing: 0.02em;
 }
 
 .flora-species-meaning {
-  margin-top: 2px;
-  font-size: 12px;
+  margin-top: 1px;
+  font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.06em;
   color: #ffd166;
@@ -236,21 +254,21 @@ body {
 
 .flora-species-poem {
   margin: 2px 0 0 0;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.42;
   color: rgba(246, 243, 238, 0.68);
 }
 
 .flora-telemetry-card {
-  margin-top: 8px;
-  padding: 9px 12px;
-  background: rgba(14, 12, 20, 0.62);
+  margin-top: 6px;
+  padding: 8px 11px;
+  background: rgba(14, 12, 20, 0.66);
   backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   pointer-events: auto;
 }
 
@@ -262,14 +280,14 @@ body {
 
 .flora-telemetry-label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9.5px;
   letter-spacing: 0.08em;
   color: rgba(246, 243, 238, 0.56);
 }
 
 .flora-telemetry-val {
   font-family: var(--font-mono);
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 500;
   color: #ffd93d;
   font-variant-numeric: tabular-nums;
@@ -285,7 +303,7 @@ body {
 
 .flora-bloom-bar-fill {
   height: 100%;
-  width: 68%;
+  width: 72%;
   background: linear-gradient(90deg, #ff9ebb 0%, #ffd93d 55%, #4ade80 100%);
   transition: width 0.08s linear;
 }
@@ -298,56 +316,172 @@ body {
 }
 
 .flora-stage-badge {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   color: #f6f3ee;
 }
 
 .flora-pose-badge {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   color: #4ade80;
 }
 
+.flora-context-status-row {
+  padding: 3px 6px;
+  background: rgba(56, 189, 248, 0.08);
+  border-left: 2px solid #38bdf8;
+  border-radius: 2px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #bae6fd;
+}
+
+.flora-rotation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.flora-rotation-readout {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: rgba(246, 243, 238, 0.65);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flora-rot-mini-group {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.flora-rot-chip {
+  padding: 2px 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  color: #f6f3ee;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  cursor: pointer;
+  text-transform: none;
+}
+
+.flora-rot-chip:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
 .flora-manual-slider-wrap {
-  margin-top: 6px;
-  padding: 8px 12px;
-  background: rgba(14, 12, 20, 0.56);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  margin-top: 5px;
+  padding: 7px 11px;
+  background: rgba(14, 12, 20, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   pointer-events: auto;
 }
 
+.flora-mode-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .flora-slider-label {
-  font-size: 11px;
-  color: rgba(246, 243, 238, 0.65);
+  font-size: 10.5px;
+  color: rgba(246, 243, 238, 0.72);
   letter-spacing: 0.03em;
+}
+
+.flora-logic-mode-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 2px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 4px;
+}
+
+.flora-logic-btn {
+  padding: 4px 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: rgba(246, 243, 238, 0.68);
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.flora-logic-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.flora-logic-btn.active {
+  color: #eafff2;
+  background: rgba(74, 222, 128, 0.2);
+  border-color: rgba(74, 222, 128, 0.58);
+}
+
+.flora-calibration-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.flora-calibration-val {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #38bdf8;
+}
+
+.flora-sensitivity-slider {
+  width: 100%;
+  height: 4px;
+  accent-color: #38bdf8;
+  cursor: pointer;
+  margin: 0;
 }
 
 .flora-bloom-slider {
   width: 100%;
+  height: 4px;
   accent-color: #ffd93d;
   cursor: pointer;
+  margin: 0;
 }
 
 .flora-pose-quick-btns {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 5px;
+  gap: 4px;
 }
 
 .flora-mini-btn {
-  padding: 4px 4px;
+  padding: 4px 3px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
-  color: rgba(246, 243, 238, 0.85);
+  color: rgba(246, 243, 238, 0.88);
   font-family: var(--font-sans);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -355,8 +489,14 @@ body {
 }
 
 .flora-mini-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.18);
   color: #ffffff;
+}
+
+.flora-mini-btn-accent {
+  background: rgba(255, 217, 61, 0.15);
+  border-color: rgba(255, 217, 61, 0.45);
+  color: #ffe875;
 }
 
 .flora-bottom-row {
@@ -364,12 +504,13 @@ body {
   align-items: flex-end;
   justify-content: space-between;
   width: 100%;
-  gap: 20px;
+  gap: 14px;
 }
 
 .flora-cam-monitor {
-  width: 326px;
-  background: rgba(12, 11, 18, 0.82);
+  width: 334px;
+  flex-shrink: 0;
+  background: rgba(12, 11, 18, 0.84);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
@@ -382,8 +523,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 5px;
+  padding: 5px 8px;
   background: rgba(255, 255, 255, 0.05);
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
 }
@@ -404,7 +545,7 @@ body {
 
 .flora-cam-title {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9.5px;
   color: rgba(246, 243, 238, 0.88);
   flex: 1;
   white-space: nowrap;
@@ -415,18 +556,18 @@ body {
 .flora-cam-inline-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   flex-shrink: 0;
 }
 
 .flora-cam-chip {
-  padding: 3px 7px;
+  padding: 3px 6px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 4px;
   color: #f6f3ee;
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -452,7 +593,7 @@ body {
 .flora-cam-viewport {
   position: relative;
   width: 100%;
-  height: 162px;
+  height: 152px;
   background: #0d0c14;
 }
 
@@ -468,7 +609,7 @@ body {
 }
 
 .flora-webcam-video.active {
-  opacity: 0.85;
+  opacity: 0.88;
 }
 
 .flora-skeleton-canvas {
@@ -476,22 +617,26 @@ body {
   inset: 0;
   width: 100%;
   height: 100%;
-  cursor: ns-resize;
+  cursor: grab;
   touch-action: none;
+}
+
+.flora-skeleton-canvas:active {
+  cursor: grabbing;
 }
 
 .flora-gesture-toast {
   position: absolute;
-  top: 10px;
+  top: 8px;
   left: 50%;
   transform: translateX(-50%) translateY(-6px);
-  padding: 4px 12px;
-  background: rgba(15, 23, 42, 0.9);
+  padding: 4px 10px;
+  background: rgba(15, 23, 42, 0.92);
   border: 1px solid #ffd93d;
   border-radius: 4px;
   color: #ffd93d;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   white-space: nowrap;
   opacity: 0;
@@ -508,28 +653,30 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   pointer-events: auto;
-  margin-right: auto;
-  margin-left: auto;
+  flex: 1;
+  min-width: 0;
 }
 
 .flora-species-cards {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px;
-  background: rgba(14, 12, 20, 0.68);
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 5px;
+  width: 100%;
+  max-width: 900px;
+  padding: 5px;
+  background: rgba(14, 12, 20, 0.72);
   backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
 }
 
 .flora-species-card {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
+  gap: 6px;
+  padding: 6px 7px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 5px;
@@ -538,6 +685,7 @@ body {
   transition: all 0.18s ease;
   text-align: left;
   text-transform: none;
+  min-width: 0;
 }
 
 .flora-species-card:hover {
@@ -546,16 +694,16 @@ body {
 }
 
 .flora-species-card.active {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 217, 61, 0.65);
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 217, 61, 0.75);
   color: #ffffff;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.32);
 }
 
 .flora-species-swatch {
-  width: 14px;
-  height: 28px;
-  border-radius: 3px;
+  width: 8px;
+  height: 26px;
+  border-radius: 2px;
   flex-shrink: 0;
 }
 
@@ -563,49 +711,49 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  min-width: 0;
 }
 
 .flora-species-card-idx {
   font-family: var(--font-mono);
-  font-size: 9px;
-  color: rgba(246, 243, 238, 0.45);
+  font-size: 8.5px;
+  color: #ffd166;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .flora-species-card-zh {
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .flora-species-card-en {
-  font-size: 10px;
-  color: rgba(246, 243, 238, 0.55);
+  font-size: 9px;
+  color: rgba(246, 243, 238, 0.52);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .flora-dock-legend {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 4px 12px;
-  background: rgba(12, 10, 18, 0.52);
+  gap: 14px;
+  padding: 3px 12px;
+  background: rgba(12, 10, 18, 0.58);
   border-radius: 4px;
-  font-size: 11px;
-  color: rgba(246, 243, 238, 0.62);
+  font-size: 10.5px;
+  color: rgba(246, 243, 238, 0.68);
 }
 
-@media (max-width: 1024px) {
-  .flora-left-editorial {
-    width: 230px;
-  }
-  .flora-species-title-zh {
-    font-size: 32px;
-  }
-  .flora-cam-monitor {
-    width: 250px;
-  }
-  .flora-cam-viewport {
-    height: 155px;
+@media (max-width: 1180px) {
+  .flora-species-cards {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .flora-dock-legend {
     display: none;
