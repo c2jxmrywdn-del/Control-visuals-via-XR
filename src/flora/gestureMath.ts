@@ -6,17 +6,25 @@ export interface Point3D {
 
 export type HandPoseLabel =
   | 'pinch-grab'
+  | 'pinch-caliper'
   | 'pinch-spread'
   | 'open-palm'
   | 'closed-fist'
   | 'victory'
   | 'pointing'
+  | 'thumb-up'
   | 'finger-count';
 
 export type InteractionLogicMode =
   | 'smart-context'
   | 'bloom-orbit-only'
   | 'dual-hand-split';
+
+export interface MLGestureHint {
+  categoryName: string;
+  score: number;
+  handedness?: 'Left' | 'Right';
+}
 
 export interface HandOrientation {
   palmCenterX: number;
@@ -41,7 +49,10 @@ export interface HandPoseClassification {
   thumbTip: Point3D;
   indexTip: Point3D;
   extendedFingers: number;
+  fingerExtensions?: [number, number, number, number, number];
   isPinchGrabbing?: boolean;
+  isEdgeClipped?: boolean;
+  mlCategoryName?: string;
   orientation: HandOrientation;
   dwellProgress01?: number;
   dwellActionLabelZh?: string;
@@ -439,6 +450,239 @@ export function distance3D(a: Point3D, b: Point3D): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+/**
+ * Computes the cosine of the angle between segment (a -> b) and segment (b -> c).
+ * Returns +1 when straight/aligned, 0 when perpendicular (90 deg bend), and < 0 when folded back.
+ * Scale-invariant and 3D rotation-invariant!
+ */
+function jointStraightnessCosine(a: Point3D, b: Point3D, c: Point3D): number {
+  const v1x = b.x - a.x;
+  const v1y = b.y - a.y;
+  const v1z = b.z - a.z;
+  const v2x = c.x - b.x;
+  const v2y = c.y - b.y;
+  const v2z = c.z - b.z;
+  const len1 = Math.sqrt(v1x * v1x + v1y * v1y + v1z * v1z);
+  const len2 = Math.sqrt(v2x * v2x + v2y * v2y + v2z * v2z);
+  if (len1 < 1e-5 || len2 < 1e-5) return 0;
+  return clamp((v1x * v2x + v1y * v2y + v1z * v2z) / (len1 * len2), -1, 1);
+}
+
+export interface FingerKinematicAnalysis {
+  // Continuous extension [0..1] for [Thumb, Index, Middle, Ring, Pinky]
+  extensions: [number, number, number, number, number];
+  extendedFlags: [boolean, boolean, boolean, boolean, boolean];
+  fourFingerAvgExtension: number;
+  allFiveAvgExtension: number;
+  extendedCount: number;
+  fourFingerExtendedCount: number;
+  otherThreeExtendedCount: number;
+  palmScale: number;
+  pinchDistRatio: number;
+  fingerFanSpreadRatio: number;
+  isEdgeClipped: boolean;
+}
+
+/**
+ * Analyzes 21 3D hand landmarks using both 3D joint flexion/extension cosines
+ * and palm-normalized tip reach so finger state detection remains accurate across:
+ *   1. Camera tilt / palm foreshortening
+ *   2. Varying hand-to-camera distance (close-up vs far)
+ *   3. Left vs Right hand and mirrored webcams
+ *   4. Frame edge clipping
+ */
+export function analyzeFingerKinematics(
+  landmarks: Point3D[],
+): FingerKinematicAnalysis {
+  if (!landmarks || landmarks.length < 21) {
+    return {
+      extensions: [0, 0, 0, 0, 0],
+      extendedFlags: [false, false, false, false, false],
+      fourFingerAvgExtension: 0,
+      allFiveAvgExtension: 0,
+      extendedCount: 0,
+      fourFingerExtendedCount: 0,
+      otherThreeExtendedCount: 0,
+      palmScale: 0.1,
+      pinchDistRatio: 0,
+      fingerFanSpreadRatio: 0,
+      isEdgeClipped: false,
+    };
+  }
+
+  const wrist = landmarks[0];
+  const indexMcp = landmarks[5];
+  const middleMcp = landmarks[9];
+  const ringMcp = landmarks[13];
+  const pinkyMcp = landmarks[17];
+
+  // Robust palm reference length combining wrist-to-middleMcp and knuckle-bridge width
+  // so palm tilt toward the camera (which foreshortens wrist->middleMcp) never breaks normalization!
+  const longitudinalPalm = distance3D(wrist, middleMcp);
+  const knuckleWidth = distance3D(indexMcp, pinkyMcp);
+  const palmScale = Math.max(
+    0.04,
+    Math.max(longitudinalPalm, knuckleWidth * 1.18),
+  );
+
+  // Check if key landmarks are clipped against the camera edge
+  let edgeCount = 0;
+  const checkIndices = [0, 4, 8, 12, 16, 20];
+  for (const idx of checkIndices) {
+    const pt = landmarks[idx];
+    if (pt.x < 0.02 || pt.x > 0.98 || pt.y < 0.02 || pt.y > 0.98) {
+      edgeCount++;
+    }
+  }
+  const isEdgeClipped = edgeCount >= 2;
+
+  // Evaluate 4 fingers: Index (5,6,7,8), Middle (9,10,11,12), Ring (13,14,15,16), Pinky (17,18,19,20)
+  const fingerChains: Array<[number, number, number, number]> = [
+    [5, 6, 7, 8],
+    [9, 10, 11, 12],
+    [13, 14, 15, 16],
+    [17, 18, 19, 20],
+  ];
+
+  const fourExtensions: number[] = [];
+  const fourFlags: boolean[] = [];
+
+  for (let i = 0; i < 4; i++) {
+    const [mcpIdx, pipIdx, dipIdx, tipIdx] = fingerChains[i];
+    const mcp = landmarks[mcpIdx];
+    const pip = landmarks[pipIdx];
+    const dip = landmarks[dipIdx];
+    const tip = landmarks[tipIdx];
+
+    const tipToWrist = distance3D(wrist, tip) / palmScale;
+    const pipToWrist = distance3D(wrist, pip) / palmScale;
+    const mcpToWrist = distance3D(wrist, mcp) / palmScale;
+
+    // 1. Reach ratio: how far the fingertip extends beyond PIP and MCP relative to wrist
+    const reachOverPip = tipToWrist / Math.max(0.15, pipToWrist);
+    const reachNorm = clamp((reachOverPip - 0.88) / (1.28 - 0.88), 0, 1);
+    const absReachNorm = clamp(
+      (tipToWrist - Math.max(0.85, mcpToWrist * 0.95)) / 0.85,
+      0,
+      1,
+    );
+
+    // 2. 3D joint straightness cosines (MCP->PIP->TIP and Wrist->MCP->TIP)
+    const pipCos = jointStraightnessCosine(mcp, pip, tip);
+    const dipCos = jointStraightnessCosine(pip, dip, tip);
+    const mcpCos = jointStraightnessCosine(wrist, mcp, pip);
+    const fingerChordLen = distance3D(mcp, tip);
+    const boneSumLen =
+      distance3D(mcp, pip) + distance3D(pip, dip) + distance3D(dip, tip);
+
+    // If bone segments have non-degenerate length (real MediaPipe hand or full chain),
+    // blend joint straightness with reach ratio; if degenerate synthetic test points, rely on reachNorm.
+    let extScore: number;
+    if (boneSumLen > palmScale * 0.22) {
+      const straightRatio = clamp((fingerChordLen / boneSumLen - 0.45) / 0.5, 0, 1);
+      const angleNorm = clamp(((pipCos + dipCos) * 0.5 + 0.2) / 1.05, 0, 1);
+      const mcpNorm = clamp((mcpCos + 0.3) / 1.1, 0, 1);
+      const jointExtension = straightRatio * 0.5 + angleNorm * 0.35 + mcpNorm * 0.15;
+      extScore = clamp(
+        Math.max(
+          reachNorm * 0.65 + absReachNorm * 0.35,
+          jointExtension * 0.65 + reachNorm * 0.35,
+        ),
+        0,
+        1,
+      );
+      // If fingertip is tucked closer to wrist than PIP, force curled
+      if (tipToWrist < pipToWrist * 0.96) {
+        extScore = Math.min(extScore, 0.18);
+      }
+    } else {
+      extScore = clamp(reachNorm * 0.65 + absReachNorm * 0.35, 0, 1);
+    }
+
+    const isExtended =
+      extScore >= 0.54 && tipToWrist > pipToWrist * 1.06 && tipToWrist > 1.18;
+    fourExtensions.push(extScore);
+    fourFlags.push(isExtended);
+  }
+
+  // Thumb evaluation: landmarks (1, 2, 3, 4)
+  const thumbTip = landmarks[4];
+  const indexTip = landmarks[8];
+  const pinchDist = distance3D(thumbTip, indexTip);
+  const pinchDistRatio = pinchDist / palmScale;
+
+  const thumbToPinkyMcp = distance3D(thumbTip, pinkyMcp) / palmScale;
+  const thumbToIndexMcp = distance3D(thumbTip, indexMcp) / palmScale;
+  const thumbToRingMcp = distance3D(thumbTip, ringMcp) / palmScale;
+
+  const thumbAbduction = clamp(
+    (Math.max(thumbToPinkyMcp, thumbToRingMcp * 1.15) - 0.78) / (1.38 - 0.78),
+    0,
+    1,
+  );
+  const thumbSepFromIndex = clamp((thumbToIndexMcp - 0.32) / 0.58, 0, 1);
+  const thumbExtension = clamp(
+    thumbAbduction * 0.65 +
+      thumbSepFromIndex * 0.2 +
+      clamp((pinchDistRatio - 0.25) / 0.85, 0, 1) * 0.15,
+    0,
+    1,
+  );
+  const isThumbExtended =
+    (thumbToPinkyMcp > 1.08 && pinchDistRatio > 0.48) || thumbExtension > 0.66;
+
+  // Finger fan spread across Index -> Pinky tips
+  const tipSpan =
+    (distance3D(landmarks[8], landmarks[12]) +
+      distance3D(landmarks[12], landmarks[16]) +
+      distance3D(landmarks[16], landmarks[20])) /
+    palmScale;
+  const fingerFanSpreadRatio = clamp(tipSpan / 1.45, 0, 1);
+
+  const extensions: [number, number, number, number, number] = [
+    thumbExtension,
+    fourExtensions[0],
+    fourExtensions[1],
+    fourExtensions[2],
+    fourExtensions[3],
+  ];
+  const extendedFlags: [boolean, boolean, boolean, boolean, boolean] = [
+    isThumbExtended,
+    fourFlags[0],
+    fourFlags[1],
+    fourFlags[2],
+    fourFlags[3],
+  ];
+
+  const fourFingerAvgExtension =
+    (fourExtensions[0] +
+      fourExtensions[1] +
+      fourExtensions[2] +
+      fourExtensions[3]) *
+    0.25;
+  const allFiveAvgExtension =
+    fourFingerAvgExtension * 0.82 + thumbExtension * 0.18;
+
+  const fourFingerExtendedCount = fourFlags.filter(Boolean).length;
+  const otherThreeExtendedCount =
+    (fourFlags[1] ? 1 : 0) + (fourFlags[2] ? 1 : 0) + (fourFlags[3] ? 1 : 0);
+  const extendedCount = fourFingerExtendedCount + (isThumbExtended ? 1 : 0);
+
+  return {
+    extensions,
+    extendedFlags,
+    fourFingerAvgExtension,
+    allFiveAvgExtension,
+    extendedCount,
+    fourFingerExtendedCount,
+    otherThreeExtendedCount,
+    palmScale,
+    pinchDistRatio,
+    fingerFanSpreadRatio,
+    isEdgeClipped,
+  };
+}
+
 export interface GestureCalibrationParams {
   sensitivityPct: number;
   landmarkMinAlpha: number;
@@ -455,11 +699,6 @@ export interface GestureCalibrationParams {
   profileLabelZh: string;
 }
 
-/**
- * Computes calibrated filter, deadband, gesture threshold, and ML confidence parameters
- * from a user-adjustable sensitivity percentage (10% = maximum low-light anti-jitter stability,
- * 50% = balanced studio default, 100% = ultra-fast micro-gesture responsiveness).
- */
 export function computeCalibrationParams(
   sensitivityPct: number,
   strongDenoise = true,
@@ -469,19 +708,20 @@ export function computeCalibrationParams(
 
   const denoiseFactor = strongDenoise ? 1.0 : 0.65;
 
-  const landmarkMinAlpha = clamp(0.06 + t * 0.34, 0.05, 0.5);
-  const landmarkMaxAlpha = clamp(0.58 + t * 0.36, 0.5, 0.96);
-  const jitterDeadband = (0.036 - t * 0.028) * denoiseFactor;
-  const bloomDeadbandPct = (3.8 - t * 3.1) * denoiseFactor;
-  const bloomAlpha = clamp(0.15 + t * 0.48, 0.12, 0.72);
-  const orientDeadbandRad = (0.034 - t * 0.026) * denoiseFactor;
-  const orientAlpha = clamp(0.14 + t * 0.42, 0.1, 0.65);
+  const landmarkMinAlpha = clamp(0.08 + t * 0.34, 0.06, 0.52);
+  const landmarkMaxAlpha = clamp(0.62 + t * 0.34, 0.52, 0.96);
+  const jitterDeadband = (0.032 - t * 0.025) * denoiseFactor;
+  const bloomDeadbandPct = (2.8 - t * 2.2) * denoiseFactor;
+  const bloomAlpha = clamp(0.2 + t * 0.48, 0.15, 0.76);
+  const orientDeadbandRad = (0.032 - t * 0.024) * denoiseFactor;
+  const orientAlpha = clamp(0.15 + t * 0.42, 0.11, 0.65);
 
-  const swipeMinDx = clamp(0.3 - t * 0.14, 0.13, 0.32);
-  const swipeMinVelocityX = clamp(0.88 - t * 0.46, 0.36, 0.95);
-  const dwellDurationMs = Math.round(1350 - t * 650);
-  // In dim lighting, higher sensitivity lowers the MediaPipe confidence threshold so hands remain tracked
-  const minHandConfidence = Number(clamp(0.62 - t * 0.28, 0.3, 0.65).toFixed(2));
+  const swipeMinDx = clamp(0.28 - t * 0.13, 0.13, 0.3);
+  const swipeMinVelocityX = clamp(0.84 - t * 0.44, 0.36, 0.92);
+  const dwellDurationMs = Math.round(1150 - t * 500);
+  const minHandConfidence = Number(
+    clamp(0.6 - t * 0.28, 0.28, 0.65).toFixed(2),
+  );
 
   let profileLabelZh = '标准均衡 (50%)';
   if (s < 35) {
@@ -511,8 +751,8 @@ export function computeCalibrationParams(
 
 /**
  * Velocity-adaptive 1€ (One-Euro) & Multi-Context Hysteresis Denoiser for 21-point 3D hand landmarks.
- * Prevents camera sensor jitter, distinguishes between finger-opening/closing (blooming) vs.
- * whole-hand translation, and supports live sensitivity calibration for different cameras/lighting.
+ * Prevents camera sensor jitter, cleanly separates flower bud opening/closing from 3D rotation,
+ * and ensures zero gesture conflicts across all hand poses.
  */
 export class HandSignalDenoiser {
   private smoothedLandmarks: Point3D[] | null = null;
@@ -520,8 +760,12 @@ export class HandSignalDenoiser {
   private smoothedPitchX = 0.56;
   private smoothedYawY = 0;
   private smoothedRollZ = 0;
-  private prevPinchAnchor: {x: number; y: number; z: number; roll: number} | null =
-    null;
+  private prevPinchAnchor: {
+    x: number;
+    y: number;
+    z: number;
+    roll: number;
+  } | null = null;
   private lastTimestampMs = -1;
   private poseHistory: HandPoseLabel[] = [];
   private strongDenoise = true;
@@ -562,12 +806,11 @@ export class HandSignalDenoiser {
   }
 
   /**
-   * Returns true if the user is currently opening or closing their fingers to adjust bloom.
-   * When true, horizontal palm translation shifts caused by finger curling must NOT trigger
-   * accidental swipe/rotation jumps.
+   * Returns true if the user is actively opening or closing their fingers to adjust flower bud bloom.
+   * When true, palm centroid shifts caused by finger curling must NOT trigger accidental swipe or rotation jumps.
    */
   isActivelyChangingBloom(): boolean {
-    return this.recentBloomVelocity > 28; // > 28% per second bloom rate
+    return this.recentBloomVelocity > 24;
   }
 
   filterLandmarks(rawLandmarks: Point3D[], nowMs: number): Point3D[] {
@@ -600,7 +843,7 @@ export class HandSignalDenoiser {
 
       const alpha = clamp(
         minAlpha +
-          (1 - Math.exp(-effectiveSpeed * 1.4)) * (maxAlpha - minAlpha),
+          (1 - Math.exp(-effectiveSpeed * 1.45)) * (maxAlpha - minAlpha),
         minAlpha,
         maxAlpha,
       );
@@ -629,12 +872,15 @@ export class HandSignalDenoiser {
       rawClass.pose === 'pinch-grab' || rawClass.isPinchGrabbing === true;
 
     if (isPinchPose) {
-      // PINCH-GRAB 3-AXIS (X, Y, Z) TRACKBALL ROTATION:
-      // While fingers are pinched, ensure bloom stays open (>= 82%) so the flower's inner stamens
-      // remain clearly visible, and translate finger movement into (X, Y, Z) 3D rotation deltas!
+      // OK-SIGN PINCH-GRAB 3-AXIS (X, Y, Z) TRACKBALL ROTATION:
+      // Maintain open bloom (>= 82%) when inspecting via OK-pinch trackball,
+      // and translate 3D finger delta into smooth (X, Y, Z) whole-specimen rotation!
       this.recentBloomVelocity = 0;
       if (this.smoothedBloom < 82) {
-        this.smoothedBloom = Math.min(100, this.smoothedBloom + 18 * safeDt * 8);
+        this.smoothedBloom = Math.min(
+          100,
+          this.smoothedBloom + 18 * safeDt * 8,
+        );
       }
       const gain = 0.8 + (cal.sensitivityPct / 100) * 0.7;
       if (this.prevPinchAnchor) {
@@ -643,16 +889,14 @@ export class HandSignalDenoiser {
         const dz = pinchMidZ - this.prevPinchAnchor.z;
         const dRoll = pinchRoll - this.prevPinchAnchor.roll;
 
-        // X-axis (Pitch): moving pinched fingers vertically tilts flower up to [-85 deg, +90 deg] to inspect stamens!
         this.smoothedPitchX = clamp(
           this.smoothedPitchX + dy * 4.0 * gain,
           -Math.PI * 0.84,
           Math.PI * 0.88,
         );
-        // Y-axis (Yaw): moving pinched fingers horizontally spins flower 360 deg!
         this.smoothedYawY += dx * 4.5 * gain;
-        // Z-axis (Roll): tilting wrist, depth movement, or diagonal pinch arc rolls flower around Z-axis!
-        const crossRoll = (dx * (pinchMidY - 0.5) - dy * (pinchMidX - 0.5)) * 1.8;
+        const crossRoll =
+          (dx * (pinchMidY - 0.5) - dy * (pinchMidX - 0.5)) * 1.8;
         this.smoothedRollZ = clamp(
           this.smoothedRollZ + (dRoll * 1.45 + dz * 2.8 + crossRoll) * gain,
           -Math.PI * 0.78,
@@ -673,18 +917,30 @@ export class HandSignalDenoiser {
 
       const instBloomRate = Math.abs(diffBloom) / safeDt;
       this.recentBloomVelocity =
-        this.recentBloomVelocity * 0.78 + instBloomRate * 0.22;
+        this.recentBloomVelocity * 0.75 + instBloomRate * 0.25;
+
+      // Fast snap to 0% tight bud or 100% full bloom when user clearly holds closed-fist or open-palm
+      const endpointBoost =
+        (rawClass.pose === 'closed-fist' && rawClass.bloomPercentage <= 5) ||
+        (rawClass.pose === 'open-palm' && rawClass.bloomPercentage >= 95)
+          ? 1.35
+          : 1.0;
 
       if (Math.abs(diffBloom) > bloomDeadband) {
-        this.smoothedBloom += diffBloom * bloomAlpha;
+        this.smoothedBloom += diffBloom * clamp(bloomAlpha * endpointBoost, 0.15, 0.88);
       } else {
-        this.smoothedBloom += diffBloom * 0.04;
+        this.smoothedBloom += diffBloom * 0.08;
       }
 
+      // If hand is clipped at the edge of the camera frame or actively changing bloom,
+      // freeze/damp 3D orientation so the flower doesn't wobble while opening/closing the bud!
       const yawDeadband = cal.orientDeadbandRad;
-      const orientAlpha = this.isActivelyChangingBloom()
-        ? 0.05
-        : cal.orientAlpha;
+      const orientAlpha = rawClass.isEdgeClipped
+        ? 0.02
+        : this.isActivelyChangingBloom()
+          ? 0.04
+          : cal.orientAlpha;
+
       const diffYaw = rawClass.orientation.targetYawYRad - this.smoothedYawY;
       if (Math.abs(diffYaw) > yawDeadband) {
         this.smoothedYawY += diffYaw * orientAlpha;
@@ -711,7 +967,7 @@ export class HandSignalDenoiser {
     }
 
     const historySize =
-      cal.sensitivityPct < 40 ? 6 : cal.sensitivityPct > 75 ? 3 : 4;
+      cal.sensitivityPct < 40 ? 5 : cal.sensitivityPct > 75 ? 2 : 3;
     this.poseHistory.push(rawClass.pose);
     if (this.poseHistory.length > historySize) {
       this.poseHistory.shift();
@@ -786,13 +1042,11 @@ export function computeHandOrientation(landmarks: Point3D[]): HandOrientation {
     -Math.PI,
     Math.PI,
   );
-  // Expanded pitch range [-1.45, +1.55] so moving hand vertically lets user look straight down into stamens!
   const targetPitchXRad = clamp(
     0.58 + (palmCenterY - 0.42) * 2.05,
     -1.45,
     1.55,
   );
-  // Z-axis roll from wrist tilt and palm lateral inclination
   const knuckleTiltZ = Math.atan2(
     pinkyMcp.y - indexMcp.y,
     Math.max(0.04, Math.abs(pinkyMcp.x - indexMcp.x)),
@@ -816,17 +1070,22 @@ export function computeHandOrientation(landmarks: Point3D[]): HandOrientation {
   };
 }
 
-function palmScaleSafe(s: number): number {
-  return Math.max(s, 0.04);
-}
-
+/**
+ * Computes continuous flower bud opening/closing percentage (0% = tight closed bud, 100% = full bloom)
+ * across multiple natural user hand habits:
+ *   1. Five-finger opening/closing (fist 0% -> half-open 50% -> open palm 100%)
+ *   2. Two-finger caliper pinch-spread (thumb + index distance 0% -> 100%)
+ *   3. Finger-by-finger progressive extension (1..5 fingers)
+ */
 export function computePinchBloomPercentage(landmarks: Point3D[]): {
   percentage: number;
   rawRatio: number;
   thumbTip: Point3D;
   indexTip: Point3D;
   extendedCount: number;
+  kinematics: FingerKinematicAnalysis;
 } {
+  const kinematics = analyzeFingerKinematics(landmarks);
   if (!landmarks || landmarks.length < 21) {
     return {
       percentage: 0,
@@ -834,46 +1093,43 @@ export function computePinchBloomPercentage(landmarks: Point3D[]): {
       thumbTip: {x: 0.45, y: 0.65, z: 0},
       indexTip: {x: 0.45, y: 0.65, z: 0},
       extendedCount: 0,
+      kinematics,
     };
   }
 
-  const wrist = landmarks[0];
   const thumbTip = landmarks[4];
   const indexTip = landmarks[8];
-  const middleMcp = landmarks[9];
+  const rawRatio = kinematics.pinchDistRatio;
+  const extendedCount = kinematics.extendedCount;
 
-  const palmSize = Math.max(distance3D(wrist, middleMcp), 0.04);
-  const pinchDist = distance3D(thumbTip, indexTip);
-  const rawRatio = pinchDist / palmSize;
-
-  const fingerTips = [8, 12, 16, 20];
-  const fingerPips = [6, 10, 14, 18];
-  let extendedCount = 0;
-  for (let i = 0; i < 4; i++) {
-    const tipDist =
-      distance3D(wrist, landmarks[fingerTips[i]]) / palmScaleSafe(palmSize);
-    const pipDist =
-      distance3D(wrist, landmarks[fingerPips[i]]) / palmScaleSafe(palmSize);
-    if (tipDist > pipDist * 1.08 && tipDist > 1.28) {
-      extendedCount++;
-    }
-  }
-  const thumbToPinky =
-    distance3D(thumbTip, landmarks[17]) / palmScaleSafe(palmSize);
-  if (thumbToPinky > 1.15 && rawRatio > 0.55) {
-    extendedCount++;
-  }
-
-  const minRatio = 0.22;
-  const maxRatio = 1.22;
+  // 1. Pinch-spread normalized curve (0.18 -> 0%, 1.15 -> 100%)
+  const minRatio = 0.2;
+  const maxRatio = 1.18;
   const pinchNorm = clamp((rawRatio - minRatio) / (maxRatio - minRatio), 0, 1);
   const pinchEased = pinchNorm * pinchNorm * (3 - 2 * pinchNorm);
 
+  // 2. Continuous 5-finger biomechanical extension curve (0.0 -> 0%, 1.0 -> 100%)
+  const bioExtNorm = clamp(
+    (kinematics.allFiveAvgExtension - 0.14) / (0.82 - 0.14),
+    0,
+    1,
+  );
+  const bioEased = bioExtNorm * bioExtNorm * (3 - 2 * bioExtNorm);
+
+  // 3. Multi-situation fusion:
+  // - If user is doing 2-finger caliper control (middle, ring, pinky curled), follow pinchEased directly!
+  // - If user is opening/closing their whole hand (2+ fingers extending), fuse continuous joint extension + pinch aperture + finger count!
   const fingerCountNorm = extendedCount / 5;
-  const combined =
-    extendedCount >= 2
-      ? Math.max(pinchEased, fingerCountNorm * 0.85 + pinchEased * 0.15)
-      : pinchEased;
+  let combined: number;
+  if (kinematics.otherThreeExtendedCount === 0 && extendedCount <= 2) {
+    // Pure thumb-index caliper or closed fist: 100% responsive from 0% bud to 100% spread!
+    combined = pinchEased;
+  } else {
+    combined = Math.max(
+      pinchEased * 0.85 + bioEased * 0.15,
+      bioEased * 0.55 + fingerCountNorm * 0.3 + pinchEased * 0.15,
+    );
+  }
 
   return {
     percentage: Math.round(clamp(combined, 0, 1) * 100),
@@ -881,12 +1137,27 @@ export function computePinchBloomPercentage(landmarks: Point3D[]): {
     thumbTip,
     indexTip,
     extendedCount,
+    kinematics,
   };
 }
 
-export function classifyHandPose(landmarks: Point3D[]): HandPoseClassification {
+/**
+ * Classifies 21-point 3D hand landmarks (plus optional MediaPipe ML GestureRecognizer neural hint)
+ * into conflict-free botanical control states.
+ *
+ * CRITICAL ANTI-CONFLICT GUARANTEE:
+ * - Closing the hand into a fist (`closed-fist`) or bringing thumb & index together with curled outer fingers
+ *   (`pinch-caliper`) ALWAYS maps smoothly to 0%..100% bud opening/closing and NEVER triggers `pinch-grab`!
+ * - `pinch-grab` (OK-sign 3D trackball rotation) ONLY triggers when thumb & index touch (`rawRatio < 0.36`)
+ *   WHILE middle, ring, and pinky fingers are extended straight (`👌 OK` pose: `otherThreeExtendedCount >= 2`).
+ */
+export function classifyHandPose(
+  landmarks: Point3D[],
+  mlHint?: MLGestureHint | null,
+): HandPoseClassification {
   const pinch = computePinchBloomPercentage(landmarks);
   const orientation = computeHandOrientation(landmarks);
+  const kin = pinch.kinematics;
 
   if (!landmarks || landmarks.length < 21) {
     return {
@@ -899,145 +1170,193 @@ export function classifyHandPose(landmarks: Point3D[]): HandPoseClassification {
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
       extendedFingers: 0,
+      fingerExtensions: [0, 0, 0, 0, 0],
       orientation,
     };
   }
 
-  const wrist = landmarks[0];
-  const palmScale = Math.max(distance3D(wrist, landmarks[9]), 0.04);
+  const mlCat = mlHint && mlHint.score >= 0.52 ? mlHint.categoryName : '';
+  const [, indexExt, middleExt, ringExt, pinkyExt] = kin.extensions;
+  const [, indexFlag, middleFlag, ringFlag, pinkyFlag] = kin.extendedFlags;
+  const thumbFlag = kin.extendedFlags[0];
+  const fourFingerCount = kin.fourFingerExtendedCount;
+  const otherThreeExtended = kin.otherThreeExtendedCount;
+  const totalFingers = kin.extendedCount;
 
-  const fingerTips = [8, 12, 16, 20];
-  const fingerPips = [6, 10, 14, 18];
-  const extendedFlags = fingerTips.map((tipIdx, i) => {
-    const tipDist = distance3D(wrist, landmarks[tipIdx]) / palmScale;
-    const pipDist = distance3D(wrist, landmarks[fingerPips[i]]) / palmScale;
-    return tipDist > pipDist * 1.1 && tipDist > 1.3;
-  });
+  // 1. OK-SIGN PINCH-GRAB (3D Trackball Rotation):
+  // STRICT DISAMBIGUATION: Requires thumb (#4) & index (#8) tips pinched closely (`rawRatio < 0.38`)
+  // AND at least 2 of the outer 3 fingers (middle, ring, pinky) clearly extended (`otherThreeExtended >= 2`),
+  // AND NOT classified by MediaPipe ML as `Closed_Fist`.
+  // This guarantees that closing the hand into a fist or pinching 2 fingers to close the flower bud
+  // NEVER conflicts with `pinch-grab`!
+  const isOkSignPinchGrab =
+    mlCat !== 'Closed_Fist' &&
+    pinch.rawRatio < 0.38 &&
+    otherThreeExtended >= 2 &&
+    middleExt > 0.58 &&
+    ringExt > 0.52;
 
-  const fourFingerCount = extendedFlags.filter(Boolean).length;
-  const otherThreeExtended =
-    (extendedFlags[1] ? 1 : 0) +
-    (extendedFlags[2] ? 1 : 0) +
-    (extendedFlags[3] ? 1 : 0);
-  const thumbExtended =
-    distance3D(landmarks[4], landmarks[17]) / palmScale > 1.12 &&
-    pinch.rawRatio > 0.52;
-  const totalFingers = fourFingerCount + (thumbExtended ? 1 : 0);
-
-  // Distinguish finger-pinch from closed fist:
-  // In a pinch-grab gesture, thumb tip (#4) and index tip (#8) touch closely (rawRatio < 0.42),
-  // AND either at least 1 other finger is extended OR the pinched fingertips are held out forward
-  // away from the wrist (indexToWristRatio > 1.05, unlike a clenched fist where fingertips tuck into palm).
-  const indexToWristRatio = distance3D(wrist, landmarks[8]) / palmScale;
-  const middleToWristRatio = distance3D(wrist, landmarks[12]) / palmScale;
-  const isFingertipPinch =
-    pinch.rawRatio < 0.42 &&
-    (otherThreeExtended >= 1 ||
-      (indexToWristRatio > 1.06 && middleToWristRatio > 1.02));
-
-  if (isFingertipPinch) {
+  if (isOkSignPinchGrab) {
     return {
       pose: 'pinch-grab',
-      labelZh: '捏合抓取 · 移动旋转(X/Y/Z轴)',
-      labelEn: 'Pinch-Grab 3D Rotate (X/Y/Z)',
+      labelZh: 'OK捏合抓取 · 移动旋转(X/Y/Z轴)',
+      labelEn: 'OK Pinch-Grab 3D Rotate (X/Y/Z)',
       confidence: 0.96,
       bloomPercentage: Math.max(85, pinch.percentage),
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
-      extendedFingers: Math.max(1, otherThreeExtended),
+      extendedFingers: Math.max(2, otherThreeExtended),
+      fingerExtensions: kin.extensions,
       isPinchGrabbing: true,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || 'OK_Pinch_Grab',
       orientation,
     };
   }
 
-  if (fourFingerCount === 0 && pinch.rawRatio < 0.48) {
+  // 2. CLOSED FIST -> Tight Closed Flower Bud (0% Bloom / 握拳含苞):
+  // Triggered when ML model detects `Closed_Fist` (with low finger extension) OR all 4 fingers are curled
+  // and thumb-index aperture is small.
+  if (
+    (mlCat === 'Closed_Fist' && fourFingerCount <= 1 && pinch.rawRatio < 0.62) ||
+    (fourFingerCount === 0 && pinch.rawRatio < 0.52 && kin.fourFingerAvgExtension < 0.42)
+  ) {
     return {
       pose: 'closed-fist',
-      labelZh: '握拳闭合 · 含苞 (0%)',
-      labelEn: 'Closed Fist (Bud)',
-      confidence: 0.96,
+      labelZh: '握拳闭合 · 含苞待放 (0%)',
+      labelEn: 'Closed Fist (Tight Bud 0%)',
+      confidence: mlCat === 'Closed_Fist' ? Math.max(0.96, mlHint!.score) : 0.96,
       bloomPercentage: 0,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
       extendedFingers: 0,
+      fingerExtensions: kin.extensions,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || 'Closed_Fist',
       orientation,
     };
   }
 
-  // Index finger pointing alone (thumb curled in): dedicated command pose candidate
+  // 3. TWO-FINGER CALIPER PINCH-SPREAD (双指游标控花 0% - 100%):
+  // When middle, ring, and pinky are curled (`otherThreeExtended === 0`) and user adjusts distance
+  // between thumb and index finger (or pinches them together to close the bud to 0%).
   if (
-    extendedFlags[0] &&
-    !extendedFlags[1] &&
-    !extendedFlags[2] &&
-    !extendedFlags[3] &&
-    !thumbExtended
+    otherThreeExtended === 0 &&
+    !middleFlag &&
+    !ringFlag &&
+    !pinkyFlag &&
+    (thumbFlag || pinch.rawRatio < 0.35 || (indexFlag && pinch.rawRatio > 0.32))
   ) {
+    // Only treat as dedicated single-finger 'pointing' command if thumb is tucked closely against palm
+    // (`!thumbFlag && pinch.rawRatio >= 0.38 && pinch.rawRatio <= 0.78`) OR ML says `Pointing_Up`.
+    const isPureSingleIndexPointing =
+      (mlCat === 'Pointing_Up' || (!thumbFlag && indexFlag && indexExt > 0.72)) &&
+      pinch.rawRatio >= 0.36 &&
+      pinch.rawRatio <= 0.76;
+
+    if (isPureSingleIndexPointing) {
+      return {
+        pose: 'pointing',
+        labelZh: '单指指令姿态 (悬停可换花)',
+        labelEn: 'Index Pointing Command',
+        confidence: mlCat === 'Pointing_Up' ? Math.max(0.94, mlHint!.score) : 0.93,
+        bloomPercentage: Math.max(20, pinch.percentage),
+        pinchRatio: pinch.rawRatio,
+        thumbTip: pinch.thumbTip,
+        indexTip: pinch.indexTip,
+        extendedFingers: 1,
+        fingerExtensions: kin.extensions,
+        isEdgeClipped: kin.isEdgeClipped,
+        mlCategoryName: mlCat || 'Pointing_Up',
+        orientation,
+      };
+    }
+
     return {
-      pose: 'pointing',
-      labelZh: '单指指令姿态 (悬停可换花)',
-      labelEn: 'Index Pointing Command',
-      confidence: 0.93,
-      bloomPercentage: Math.max(20, pinch.percentage),
+      pose: 'pinch-caliper',
+      labelZh: `双指微距控苞 · ${pinch.percentage}%`,
+      labelEn: `Two-Finger Bud Caliper (${pinch.percentage}%)`,
+      confidence: 0.94,
+      bloomPercentage: pinch.percentage,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
-      extendedFingers: 1,
+      extendedFingers: totalFingers,
+      fingerExtensions: kin.extensions,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || 'Pinch_Caliper',
       orientation,
     };
   }
 
+  // 4. VICTORY / PEACE POSE (✌️ 双指伸展 — 40% 微绽 & 悬停换景):
   if (
-    extendedFlags[0] &&
-    extendedFlags[1] &&
-    !extendedFlags[2] &&
-    !extendedFlags[3] &&
-    !thumbExtended
+    (mlCat === 'Victory' && fourFingerCount === 2) ||
+    (indexFlag && middleFlag && !ringFlag && !pinkyFlag && !thumbFlag)
   ) {
     return {
       pose: 'victory',
       labelZh: '双指微绽 · 40% (悬停可换景)',
       labelEn: 'Victory Pose',
-      confidence: 0.92,
+      confidence: mlCat === 'Victory' ? Math.max(0.94, mlHint!.score) : 0.92,
       bloomPercentage: Math.max(40, pinch.percentage),
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
       extendedFingers: 2,
+      fingerExtensions: kin.extensions,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || 'Victory',
       orientation,
     };
   }
 
-  if (fourFingerCount === 4 && (thumbExtended || pinch.rawRatio >= 0.92)) {
+  // 5. OPEN PALM -> Full Anthesis (100% Full Bloom / 五指全张盛放):
+  if (
+    (mlCat === 'Open_Palm' && fourFingerCount >= 3) ||
+    (fourFingerCount === 4 && (thumbFlag || pinch.rawRatio >= 0.88))
+  ) {
     return {
       pose: 'open-palm',
-      labelZh: '五指全张 · 盛放 (100%)',
-      labelEn: 'Open Palm (Full Bloom)',
-      confidence: 0.96,
+      labelZh: '五指全张 · 倾城盛放 (100%)',
+      labelEn: 'Open Palm (Full Bloom 100%)',
+      confidence: mlCat === 'Open_Palm' ? Math.max(0.96, mlHint!.score) : 0.96,
       bloomPercentage: 100,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
       extendedFingers: 5,
+      fingerExtensions: kin.extensions,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || 'Open_Palm',
       orientation,
     };
   }
 
+  // 6. PROGRESSIVE FINGER EXTENSION (1..4 fingers -> Smooth proportional bud opening):
   if (fourFingerCount >= 1 && fourFingerCount <= 4) {
-    const countBloom = Math.round(
-      clamp(totalFingers * 20, pinch.percentage * 0.7, 100),
+    const continuousBioPct = Math.round(
+      clamp(
+        totalFingers * 18 + kin.fourFingerAvgExtension * 28,
+        pinch.percentage * 0.75,
+        96,
+      ),
     );
     return {
       pose: 'finger-count',
-      labelZh: `伸展 ${totalFingers} 指 · 绽放 ${countBloom}%`,
-      labelEn: `${totalFingers} Fingers (${countBloom}%)`,
-      confidence: 0.91,
-      bloomPercentage: countBloom,
+      labelZh: `伸展 ${totalFingers} 指 · 绽放 ${continuousBioPct}%`,
+      labelEn: `${totalFingers} Fingers (${continuousBioPct}%)`,
+      confidence: 0.92,
+      bloomPercentage: continuousBioPct,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
       indexTip: pinch.indexTip,
       extendedFingers: totalFingers,
+      fingerExtensions: kin.extensions,
+      isEdgeClipped: kin.isEdgeClipped,
+      mlCategoryName: mlCat || `Fingers_${totalFingers}`,
       orientation,
     };
   }
@@ -1052,6 +1371,9 @@ export function classifyHandPose(landmarks: Point3D[]): HandPoseClassification {
     thumbTip: pinch.thumbTip,
     indexTip: pinch.indexTip,
     extendedFingers: totalFingers,
+    fingerExtensions: kin.extensions,
+    isEdgeClipped: kin.isEdgeClipped,
+    mlCategoryName: mlCat || 'Continuous_Spread',
     orientation,
   };
 }
@@ -1099,11 +1421,11 @@ export type TriggeredGestureEvent =
     };
 
 /**
- * Tracks intentional gesture commands across multiple contexts:
- * - For a dedicated secondary command hand (when 2 hands are visible), allows quick fist-to-palm or wave.
- * - For a single primary hand, NEVER triggers on fist-to-palm (because opening the hand is used for blooming the flower!),
- *   and requires either a wide, steady-finger horizontal swipe OR holding a deliberate command pose (`pointing` / `victory`)
- *   for `dwellDurationMs` so normal finger movements never falsely change the flower!
+ * Multi-Context Gesture Command Detector:
+ * - Rejects any accidental palm shift caused by opening/closing fingers during flower bud blooming.
+ * - Requires steady finger extension (`maxF - minF <= 1`), trajectory linearity (`|dx| / pathLen > 0.78`),
+ *   and horizontal dominance (`|dx| > 1.65 * |dy|`) for single-hand wave morphing.
+ * - Supports visual dwell confirmation (`pointing` -> morph flower, `victory` -> switch environment).
  */
 export class SecondHandGestureDetector {
   private history: Array<{
@@ -1132,10 +1454,6 @@ export class SecondHandGestureDetector {
     this.dwellStartMs = -1;
   }
 
-  /**
-   * Used ONLY for the secondary command hand when two hands are in frame,
-   * OR in unit tests when explicitly testing pulse detection.
-   */
   updateHandPosePulse(
     extendedFingers: number,
     nowMs: number,
@@ -1168,15 +1486,11 @@ export class SecondHandGestureDetector {
     return null;
   }
 
-  /**
-   * Evaluates dwell confirmation for deliberate single-hand pose commands (`pointing` -> next flower, `victory` -> next env)
-   * so brief finger transitions while opening/closing the hand never trigger accidental switches.
-   */
   updateDwellCommand(
     pose: HandPoseLabel,
     isChangingBloom: boolean,
     nowMs: number,
-    dwellThresholdMs = 1050,
+    dwellThresholdMs = 950,
   ): {
     progress01: number;
     actionLabelZh: string;
@@ -1198,7 +1512,7 @@ export class SecondHandGestureDetector {
       return {
         progress01: 0.05,
         actionLabelZh:
-          pose === 'pointing' ? '保持单指 ➔ 切换花朵' : '保持双指 ➔ 切换花境',
+          pose === 'pointing' ? '保持单指 ➔ 幻化下一花种' : '保持双指 ➔ 切换花境',
         triggered: null,
       };
     }
@@ -1207,7 +1521,7 @@ export class SecondHandGestureDetector {
     const progress01 = clamp(elapsed / dwellThresholdMs, 0, 1);
     const actionLabelZh =
       pose === 'pointing'
-        ? `保持单指切换花朵 (${Math.round(progress01 * 100)}%)`
+        ? `保持单指幻化花种 (${Math.round(progress01 * 100)}%)`
         : `保持双指切换花境 (${Math.round(progress01 * 100)}%)`;
 
     if (progress01 >= 1) {
@@ -1241,11 +1555,6 @@ export class SecondHandGestureDetector {
     return {progress01, actionLabelZh, triggered: null};
   }
 
-  /**
-   * Detects intentional horizontal/vertical wave.
-   * When `requireSteadyFingers = true` (single-hand mode), rejects any motion where finger count
-   * is changing (so opening/closing the hand to bloom NEVER triggers a wave!).
-   */
   updatePalmCenter(
     palmX: number,
     palmY: number,
@@ -1272,8 +1581,6 @@ export class SecondHandGestureDetector {
       return null;
     }
 
-    // If requireSteadyFingers is active (single-hand mode), ensure finger count didn't jump
-    // (e.g., user is opening fist 0 -> 5 to bloom the flower, NOT waving to change flower!)
     if (options?.requireSteadyFingers) {
       let minF = 99;
       let maxF = -1;
@@ -1281,7 +1588,8 @@ export class SecondHandGestureDetector {
         if (item.fingers < minF) minF = item.fingers;
         if (item.fingers > maxF) maxF = item.fingers;
       }
-      if (maxF - minF > 1) {
+      // Reject if fingers are opening/closing (e.g. fist -> palm bloom) or if hand is a closed fist (0 fingers)
+      if (maxF - minF > 1 || maxF === 0) {
         return null;
       }
     }
@@ -1292,10 +1600,23 @@ export class SecondHandGestureDetector {
     const dx = last.x - first.x;
     const dy = last.y - first.y;
 
+    // Verify path linearity so random circular hand wiggles don't trigger a swipe
+    let pathLen = 0;
+    for (let i = 1; i < this.history.length; i++) {
+      const segDx = this.history[i].x - this.history[i - 1].x;
+      const segDy = this.history[i].y - this.history[i - 1].y;
+      pathLen += Math.sqrt(segDx * segDx + segDy * segDy);
+    }
+    const netDisp = Math.sqrt(dx * dx + dy * dy);
+    const linearity = pathLen > 1e-4 ? netDisp / pathLen : 1;
+    if (linearity < 0.72) {
+      return null;
+    }
+
     const minDx = options?.minDx ?? 0.14;
     const minVx = options?.minVelocityX ?? 0.42;
 
-    if (Math.abs(dx) >= minDx && Math.abs(dx) > Math.abs(dy) * 1.45) {
+    if (Math.abs(dx) >= minDx && Math.abs(dx) > Math.abs(dy) * 1.55) {
       const velocityX = dx / elapsedSec;
       if (Math.abs(velocityX) >= minVx) {
         this.lastTriggerTimeMs = nowMs;
@@ -1391,26 +1712,26 @@ export function computeFloralShellEnvelope(
       : 0.074;
 
   const stamenClosedPitchRange: [number, number] = isLily
-    ? [0.06, 0.12]
-    : [0.08, 0.22];
+    ? [0.04, 0.09]
+    : [0.05, 0.14];
   const stamenOpenPitchRange: [number, number] = isLily
     ? [0.34, 0.44]
     : [0.32, 0.68];
 
+  // Tight closed-bud pitch range so at b=0 all petals cup closely into an authentic imbricate flower bud
   const petalClosedPitchRange: [number, number] = isSunflower
-    ? [0.26, 0.48]
-    : [0.24, 0.52];
+    ? [0.18, 0.36]
+    : [0.16, 0.38];
   const petalOpenPitchRange: [number, number] = isSunflower
     ? [spec.maxOpenAngleRad * 0.92, spec.maxOpenAngleRad * 1.06]
     : [0.82, spec.maxOpenAngleRad];
 
   const sepalRadius = petalMaxRadius + 0.009;
   const sepalY = 0.004;
-  const sepalClosedPitch = petalClosedPitchRange[1] + 0.12;
+  const sepalClosedPitch = petalClosedPitchRange[1] + 0.1;
   const sepalOpenPitch = petalOpenPitchRange[1] + 0.2;
 
   const maxCorollaReachRadius = petalMaxRadius + spec.petalLength * 1.05;
-  // Place companion bud well outside and below the full open petal reach envelope
   const companionBudPosition: [number, number, number] = [
     maxCorollaReachRadius + 0.055,
     -0.12,
@@ -1439,9 +1760,12 @@ export function computeFloralShellEnvelope(
 }
 
 /**
- * Evaluates a strictly monotonic opening pitch angle for a petal or sepal at normalizedRank
- * and bloom01 in [0, 1]. Higher normalizedRank (outer whorls) always open earlier and wider
- * than lower normalizedRank (inner whorls), guaranteeing zero layer crossing.
+ * Evaluates a strictly monotonic, multi-stage botanical opening pitch angle for a petal or sepal
+ * at normalizedRank and bloom01 in [0, 1].
+ * - Calyx sepals (normalizedRank < 0) unclasping first during early bud stage [0..0.32]
+ * - Outer guard petals (normalizedRank -> 1) peel open from b = 0
+ * - Inner heart petals (normalizedRank -> 0) stay cupped in early bud stage and unfurl smoothly up to b = 1
+ * Strictly preserves innerPitch < midPitch < outerPitch < sepalPitch at every b in [0, 1]!
  */
 export function evaluateOrganPitchAtBloom(
   closedPitch: number,
@@ -1451,15 +1775,14 @@ export function evaluateOrganPitchAtBloom(
 ): number {
   const b = clamp(bloom01, 0, 1);
   if (normalizedRank < 0) {
-    // Calyx sepal: opens earliest so outer petals never collide with sepals
-    const sepalP = clamp(b / 0.36, 0, 1);
+    const sepalP = clamp(b / 0.34, 0, 1);
     const smoothS = sepalP * sepalP * (3 - 2 * sepalP);
     return closedPitch + (openPitch - closedPitch) * smoothS;
   }
 
   const rank = clamp(normalizedRank, 0, 1);
-  // Outer petals (rank=1) start at b=0; innermost petals (rank=0) start at b=0.14
-  const startAt = (1 - rank) * 0.14;
+  // Outer petals (rank=1) start opening immediately at b=0; inner heart petals (rank=0) start at b=0.18
+  const startAt = (1 - rank) * 0.18;
   const span = 1 - startAt;
   const rawP = clamp((b - startAt) / Math.max(0.2, span), 0, 1);
   const smoothP = rawP * rawP * (3 - 2 * rawP);
@@ -1472,8 +1795,7 @@ export function evaluateStamenPitchAtBloom(
   bloom01: number,
 ): number {
   const b = clamp(bloom01, 0, 1);
-  const stamenP = clamp((b - 0.12) / 0.88, 0, 1);
+  const stamenP = clamp((b - 0.18) / 0.82, 0, 1);
   const smoothP = stamenP * stamenP * (3 - 2 * stamenP);
   return closedPitch + (openPitch - closedPitch) * smoothP;
 }
-

@@ -26,6 +26,9 @@ interface StamenPivotData {
 }
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // ~2.3999632 rad (137.508 deg)
+const IS_HEADLESS =
+  typeof navigator !== 'undefined' &&
+  (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
 const textureCache = new Map<string, THREE.CanvasTexture>();
 
 /**
@@ -81,17 +84,20 @@ function applyUE5FoliageSubsurfaceShader(
  * primary midrib, dichotomous secondary veins, and delicate tertiary anastomosing venation.
  */
 function getBotanicalNormalTexture(): THREE.CanvasTexture {
-  const key = 'ue5_botanical_normal_1024_v7';
+  const size = IS_HEADLESS ? 256 : 1024;
+  const key = `ue5_botanical_normal_${size}_v7`;
   if (textureCache.has(key)) return textureCache.get(key)!;
 
-  const size = 1024;
+  const scale = size / 1024;
   const hCanvas = document.createElement('canvas');
   hCanvas.width = size;
   hCanvas.height = size;
   const hCtx = hCanvas.getContext('2d')!;
+  hCtx.save();
+  hCtx.scale(scale, scale);
 
   hCtx.fillStyle = '#808080';
-  hCtx.fillRect(0, 0, size, size);
+  hCtx.fillRect(0, 0, 1024, 1024);
 
   const midGrad = hCtx.createLinearGradient(448, 0, 576, 0);
   midGrad.addColorStop(0, 'rgba(128,128,128,0)');
@@ -100,13 +106,13 @@ function getBotanicalNormalTexture(): THREE.CanvasTexture {
   midGrad.addColorStop(0.65, 'rgba(190,190,190,0.32)');
   midGrad.addColorStop(1, 'rgba(128,128,128,0)');
   hCtx.fillStyle = midGrad;
-  hCtx.fillRect(448, 0, 128, size);
+  hCtx.fillRect(448, 0, 128, 1024);
 
   for (let i = 0; i < 56; i++) {
     const u = i / 55;
     const spreadX = (u - 0.5) * 960;
     hCtx.beginPath();
-    hCtx.moveTo(512 + (u - 0.5) * 68, size);
+    hCtx.moveTo(512 + (u - 0.5) * 68, 1024);
     hCtx.bezierCurveTo(
       512 + spreadX * 0.28,
       720,
@@ -120,6 +126,7 @@ function getBotanicalNormalTexture(): THREE.CanvasTexture {
     hCtx.lineWidth = i % 2 === 0 ? 3.4 : 1.8;
     hCtx.stroke();
   }
+  hCtx.restore();
 
   const srcData = hCtx.getImageData(0, 0, size, size).data;
   const nCanvas = document.createElement('canvas');
@@ -327,8 +334,8 @@ function samplePetalSurfacePointAndNormal(
   geometry: THREE.BufferGeometry,
   uNorm: number,
   vNorm: number,
-  segU = 44,
-  segV = 52,
+  segU = IS_HEADLESS ? 20 : 44,
+  segV = IS_HEADLESS ? 24 : 52,
 ): {position: THREE.Vector3; normal: THREE.Vector3} {
   const col = clamp(Math.round(((uNorm + 1) * 0.5) * segU), 0, segU);
   const row = clamp(Math.round((1 - vNorm) * segV), 0, segV);
@@ -351,9 +358,8 @@ function samplePetalSurfacePointAndNormal(
 }
 
 /**
- * High-poly UE5 sculpted petal/leaf geometry (44 x 52 = 4,576 triangles per mesh)
- * with authentic botanical tip roundness, optional leaf margin serration, and
- * strictly bounded shell curvature so adjacent phyllotaxis whorls never self-intersect.
+ * High-poly UE5 sculpted petal/leaf geometry (44 x 52 = 4,576 triangles per mesh on GPU,
+ * 20 x 24 in headless software WebGL) with authentic botanical tip roundness and margin serration.
  */
 function createSculptedPetalGeometry(
   length: number,
@@ -368,8 +374,8 @@ function createSculptedPetalGeometry(
   tipRoundness = 0.65,
   serrationAmp = 0.0,
 ): THREE.BufferGeometry {
-  const segU = 44;
-  const segV = 52;
+  const segU = IS_HEADLESS ? 20 : 44;
+  const segV = IS_HEADLESS ? 24 : 52;
   const geometry = new THREE.PlaneGeometry(1, 1, segU, segV);
   const pos = geometry.attributes.position;
   const colors = new Float32Array(pos.count * 3);
@@ -522,6 +528,7 @@ export class ProceduralFlowerModel extends THREE.Group {
   private readonly flowerHeadGroup = new THREE.Group();
   private readonly companionBudGroup = new THREE.Group();
   private readonly petalPivots: PetalPivotData[] = [];
+  private readonly companionBudPivots: PetalPivotData[] = [];
   private readonly stamenPivots: StamenPivotData[] = [];
   private readonly materialsToDispose: THREE.Material[] = [];
   private readonly geometriesToDispose: THREE.BufferGeometry[] = [];
@@ -538,10 +545,10 @@ export class ProceduralFlowerModel extends THREE.Group {
 
     this.scale.setScalar(1.38);
 
-    // Flower head pivots around the spherical Peduncle-Receptacle Ball Joint at (0, 0.045, 0)
-    // so tilting on X/Z axes keeps the receptacle seamlessly joined to the stem apex while the
-    // stem bottom remains permanently seated in the bottom sanctuary base!
+    // Flower head is permanently spliced to the stem apex at (0, 0.045, 0) with a natural
+    // botanical inclination so the flower bud, stem, branches, and leaves ALWAYS rotate together!
     this.flowerHeadGroup.position.set(0, 0.045, 0);
+    this.flowerHeadGroup.rotation.set(0.16, 0, 0);
     this.add(this.flowerHeadGroup);
 
     // Subtle warm nectar fill light (kept low so stamens and seeds never wash out or overexpose!)
@@ -557,8 +564,8 @@ export class ProceduralFlowerModel extends THREE.Group {
   }
 
   /**
-   * Tilts the flower head around the spherical peduncle-receptacle articulation joint
-   * while keeping the bottom of the stem permanently connected to the sanctuary base.
+   * Stores user pitch/roll telemetry while keeping the flower head unified with its stem and leaves
+   * (whole-plant 3-axis rotation is applied to flowerPivotGroup so branches, leaves, and buds rotate in unison).
    */
   setHeadOrientation(pitchXRad: number, rollZRad: number): void {
     this.userHeadPitchRad = pitchXRad;
@@ -608,9 +615,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.geometriesToDispose.push(stemGeo);
     this.materialsToDispose.push(stemMat);
 
-    // 2. BOTTOM BASE CONNECTION: Woody Root-Collar + Bronze-Jade Ikebana Kenzan Socket at (0, -0.305, 0)
-    // Seamlessly joins the bottom of the stem into the water sanctuary pedestal!
+    // 2. BOTTOM BASE CONNECTION: Woody Root-Collar + Attached Bronze-Jade Ikebana Kenzan Pod at (0, -0.312, 0)
+    // Seamlessly splices the bottom of the stem into a watertight botanical kenzan holder that rotates with the plant!
     const rootCollarPoints = [
+      new THREE.Vector2(0.0, -0.322),
+      new THREE.Vector2(0.038, -0.322),
       new THREE.Vector2(0.036, -0.312),
       new THREE.Vector2(0.032, -0.298),
       new THREE.Vector2(0.021, -0.282),
@@ -623,6 +632,28 @@ export class ProceduralFlowerModel extends THREE.Group {
     rootCollarMesh.receiveShadow = true;
     this.add(rootCollarMesh);
     this.geometriesToDispose.push(rootCollarGeo);
+
+    // Sculpted Champagne-Gold & Dark-Jade Ikebana Kenzan Socket Ring clasping the root collar
+    const kenzanPodProfile = [
+      new THREE.Vector2(0.0, -0.332),
+      new THREE.Vector2(0.052, -0.332),
+      new THREE.Vector2(0.058, -0.318),
+      new THREE.Vector2(0.048, -0.304),
+      new THREE.Vector2(0.034, -0.304),
+    ];
+    const kenzanPodGeo = new THREE.LatheGeometry(kenzanPodProfile, 36);
+    const kenzanPodMat = new THREE.MeshPhysicalMaterial({
+      color: 0xb89635,
+      roughness: 0.28,
+      metalness: 0.78,
+      clearcoat: 0.5,
+    });
+    const kenzanPodMesh = new THREE.Mesh(kenzanPodGeo, kenzanPodMat);
+    kenzanPodMesh.castShadow = true;
+    kenzanPodMesh.receiveShadow = true;
+    this.add(kenzanPodMesh);
+    this.geometriesToDispose.push(kenzanPodGeo);
+    this.materialsToDispose.push(kenzanPodMat);
 
     // Basal whorl of 3 clasping scale leaves (底部抱茎鳞片叶，严密包裹茎基与底座交界)
     const basalScaleGeo = createSculptedPetalGeometry(
@@ -943,12 +974,24 @@ export class ProceduralFlowerModel extends THREE.Group {
         0.02 - rank * 0.004,
         Math.sin(yaw) * r,
       );
-      p.rotation.y = -yaw - Math.PI / 2;
+      const baseYaw = -yaw - Math.PI / 2;
+      p.rotation.y = baseYaw;
       const m = new THREE.Mesh(budPetalGeo, budPetalMat);
-      m.rotation.x = -(0.08 + rank * 0.22);
+      const closedPitch = 0.08 + rank * 0.18;
+      const openPitch = 0.34 + rank * 0.56;
+      m.rotation.x = -closedPitch;
       m.castShadow = true;
       p.add(m);
       this.companionBudGroup.add(p);
+      this.companionBudPivots.push({
+        pivot: p,
+        mesh: m,
+        normalizedRank: rank,
+        closedPitch,
+        openPitch,
+        baseYaw,
+        phaseOffset: i * 0.5,
+      });
     }
     this.add(this.companionBudGroup);
   }
@@ -1875,15 +1918,16 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.currentBloom01 = clamp(bloom01, 0, 1);
     const b = this.currentBloom01;
 
-    // Keep the flowerHeadGroup anchored at the spherical peduncle apex ball (0, 0.045, 0)
-    // and apply Pitch X / Roll Z there so the stem base NEVER detaches from the bottom pedestal!
+    // Keep the flowerHeadGroup organically locked to the stem apex at (0, 0.045, 0)
+    // with only a subtle natural breeze micro-sway so the flower head, stem, leaves,
+    // and companion bud ALWAYS rotate together as one unified botanical specimen!
     this.flowerHeadGroup.position.set(0, 0.045, 0);
-    this.flowerHeadGroup.rotation.x = this.userHeadPitchRad;
-    this.flowerHeadGroup.rotation.z =
-      this.userHeadRollRad + Math.sin(elapsedSec * 0.9) * 0.008;
+    this.flowerHeadGroup.rotation.x = 0.16 + Math.cos(elapsedSec * 0.85) * 0.006;
+    this.flowerHeadGroup.rotation.z = Math.sin(elapsedSec * 0.9) * 0.006;
 
     this.coreGlowLight.intensity = 0.04 + Math.pow(b, 1.2) * 0.08;
 
+    // 1. Main Corolla Petals & Calyx Sepals: Multi-stage bud-to-full-anthesis kinematics
     for (const item of this.petalPivots) {
       const basePitch = evaluateOrganPitchAtBloom(
         item.closedPitch,
@@ -1898,11 +1942,34 @@ export class ProceduralFlowerModel extends THREE.Group {
 
       item.mesh.rotation.x = -(basePitch + flutter);
 
+      // In tight bud state (b -> 0), enhance inward cupping and imbricate spiral wrap
+      if (item.normalizedRank >= 0) {
+        const budCupScaleZ = 1.24 - 0.24 * b;
+        const budWidthScaleX = 0.88 + 0.12 * b;
+        item.mesh.scale.set(budWidthScaleX, 1.0, budCupScaleZ);
+      }
+
       const spiralTwist =
-        item.normalizedRank >= 0 ? (1 - b) * 0.14 * item.normalizedRank : 0;
+        item.normalizedRank >= 0 ? (1 - b) * 0.22 * item.normalizedRank : 0;
       item.pivot.rotation.y = item.baseYaw + spiralTwist;
     }
 
+    // 2. Companion Side Bud Petals: Synchronously opens from tight side bud into graceful side blossom
+    for (const budItem of this.companionBudPivots) {
+      const budPitch = evaluateOrganPitchAtBloom(
+        budItem.closedPitch,
+        budItem.openPitch,
+        budItem.normalizedRank,
+        b * 0.85,
+      );
+      const flutter =
+        Math.sin(elapsedSec * 2.1 + budItem.phaseOffset) * 0.005 * (0.2 + 0.8 * b);
+      budItem.mesh.rotation.x = -(budPitch + flutter);
+      const twist = (1 - b) * 0.18 * budItem.normalizedRank;
+      budItem.pivot.rotation.y = budItem.baseYaw + twist;
+    }
+
+    // 3. Stamens: Fan outward as corolla opens
     for (const st of this.stamenPivots) {
       const baseStamenPitch = evaluateStamenPitchAtBloom(
         st.closedPitch,

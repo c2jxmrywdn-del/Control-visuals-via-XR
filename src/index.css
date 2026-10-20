@@ -262,9 +262,8 @@ body {
 .flora-telemetry-card {
   margin-top: 6px;
   padding: 8px 11px;
-  background: rgba(14, 12, 20, 0.66);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(14, 12, 20, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
@@ -510,8 +509,7 @@ body {
 .flora-cam-monitor {
   width: 334px;
   flex-shrink: 0;
-  background: rgba(12, 11, 18, 0.84);
-  backdrop-filter: blur(16px);
+  background: rgba(12, 11, 18, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
   overflow: hidden;
@@ -666,8 +664,7 @@ body {
   width: 100%;
   max-width: 900px;
   padding: 5px;
-  background: rgba(14, 12, 20, 0.72);
-  backdrop-filter: blur(16px);
+  background: rgba(14, 12, 20, 0.88);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
 }
@@ -756,6 +753,65 @@ body {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .flora-dock-legend {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .flora-hud-root {
+    padding: 10px 12px;
+  }
+  .flora-top-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .flora-brand-sub,
+  .flora-species-poem,
+  .flora-species-meaning,
+  .flora-species-title-en {
+    display: none;
+  }
+  .flora-env-bar {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+    overflow-x: auto;
+  }
+  .flora-top-actions {
+    gap: 4px;
+  }
+  .flora-action-btn {
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+  .flora-left-editorial {
+    position: static;
+    width: 100%;
+    margin-top: 4px;
+  }
+  .flora-species-title-zh {
+    font-size: 22px;
+  }
+  .flora-bottom-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .flora-cam-monitor {
+    width: 100%;
+  }
+  .flora-cam-viewport {
+    height: 108px;
+  }
+  .flora-species-cards {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 4px;
+  }
+  .flora-species-card {
+    padding: 4px 5px;
+  }
+  .flora-species-card-en {
     display: none;
   }
 }

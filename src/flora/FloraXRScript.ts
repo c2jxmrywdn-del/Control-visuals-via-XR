@@ -33,7 +33,11 @@ declare global {
 export class FloraXRScript extends xb.Script {
   private readonly flowerModels = new Map<string, ProceduralFlowerModel>();
   private activeFlowerModel!: ProceduralFlowerModel;
+  private morphOutgoingModel: ProceduralFlowerModel | null = null;
+  private morphProgress = 1.0;
+
   private flowerStageGroup = new THREE.Group();
+  private flowerTiltGroup = new THREE.Group();
   private flowerPivotGroup = new THREE.Group();
   private environmentManager!: EnvironmentManager;
   private handOverlay!: HandTrackerOverlay;
@@ -48,7 +52,7 @@ export class FloraXRScript extends xb.Script {
 
   private readonly bloomSpring = new SpringDamper(78, 110, 22);
   private readonly transitionScaleSpring = new SpringDamper(1.0, 170, 20);
-  // 3-Axis (X: Pitch, Y: Yaw, Z: Roll) spring dampers with expanded stamen-inspection limits
+  // Unified whole-plant 3-Axis (X: Pitch, Y: Yaw, Z: Roll) spring dampers
   private readonly pitchSpring = new SpringDamper(0.58, 82, 18);
   private readonly yawSpring = new SpringDamper(0, 82, 18);
   private readonly rollSpring = new SpringDamper(0, 82, 18);
@@ -67,19 +71,16 @@ export class FloraXRScript extends xb.Script {
     this.environmentManager = new EnvironmentManager();
     this.add(this.environmentManager);
 
-    for (const spec of FLOWER_LIBRARY) {
-      const model = createFlowerById(spec.id);
-      model.visible = false;
-      this.flowerModels.set(spec.id, model);
-      this.flowerPivotGroup.add(model);
-    }
-
-    this.activeFlowerModel = this.flowerModels.get(FLOWER_LIBRARY[0].id)!;
+    this.activeFlowerModel = this.getOrCreateFlowerModel(FLOWER_LIBRARY[0].id);
     this.activeFlowerModel.visible = true;
 
     this.flowerStageGroup.name = 'BotanicalFlowerStage';
-    this.flowerStageGroup.position.set(0, 1.24, -1.08);
-    this.flowerStageGroup.add(this.flowerPivotGroup);
+    this.flowerStageGroup.position.set(0, 1.22, -1.08);
+    // Hierarchy: flowerStageGroup -> flowerTiltGroup (Pitch X & Roll Z) -> flowerPivotGroup (Yaw Y) -> ProceduralFlowerModel (Head + Buds + Stem + Leaves + Root Base)
+    // Because the entire ProceduralFlowerModel lives inside flowerPivotGroup, all branches, leaves, companion buds,
+    // and the main flower bud ALWAYS rotate together in 100% unison on X, Y, and Z!
+    this.flowerTiltGroup.add(this.flowerPivotGroup);
+    this.flowerStageGroup.add(this.flowerTiltGroup);
     this.add(this.flowerStageGroup);
 
     this.buildSpatialUICard();
@@ -97,8 +98,6 @@ export class FloraXRScript extends xb.Script {
         if (isActiveHand) {
           this.handRotationActiveUntilSec = xb.getElapsedTime() + 1.8;
           this.yawSpring.setTarget(targetYawY);
-          // Expanded X-axis pitch limit [-1.48, +1.56] rad (-85° to +89°) so tilting hand or pinching
-          // lets the user look straight down into the flower core & stamens!
           this.pitchSpring.setTarget(clamp(targetPitchX, -1.48, 1.56));
           this.rollSpring.setTarget(clamp(targetRollZ, -1.35, 1.35));
         }
@@ -116,7 +115,12 @@ export class FloraXRScript extends xb.Script {
       onToggleLowNoise: (enabled) => {
         this.environmentManager.setLowNoiseMode(enabled);
       },
-      onRotateStep: (deltaYaw, deltaPitch = 0, deltaRoll = 0, resetAxes = false) => {
+      onRotateStep: (
+        deltaYaw,
+        deltaPitch = 0,
+        deltaRoll = 0,
+        resetAxes = false,
+      ) => {
         this.handRotationActiveUntilSec = xb.getElapsedTime() + 3.2;
         if (resetAxes) {
           this.pitchSpring.setTarget(0.58);
@@ -126,7 +130,6 @@ export class FloraXRScript extends xb.Script {
         }
         this.yawSpring.setTarget(this.yawSpring.target + deltaYaw);
         if (deltaPitch !== 0) {
-          // Toggle between deep stamen inspection tilt (1.18 rad = 68°) and natural 33° view (0.58 rad)
           const nextPitch =
             Math.abs(deltaPitch) > 0.5
               ? clamp(deltaPitch, -1.48, 1.56)
@@ -256,7 +259,6 @@ export class FloraXRScript extends xb.Script {
 
         this.handRotationActiveUntilSec = xb.getElapsedTime() + 3.5;
         if (e.shiftKey || e.buttons === 2) {
-          // Shift+drag or Right-drag adjusts Z-axis Roll directly on stage
           this.rollSpring.setTarget(
             clamp(this.rollSpring.target + dx * 0.012, -1.35, 1.35),
           );
@@ -313,6 +315,55 @@ export class FloraXRScript extends xb.Script {
     gestures.addEventListener('gesturestart', this.onGestureStartBound);
   }
 
+  private applyUnifiedSpecimenTransforms(
+    bloom01: number,
+    transitionScale: number,
+    pitchX: number,
+    yawY: number,
+    rollZ: number,
+    elapsedSec: number,
+    dt: number,
+  ): void {
+    // Advance cross-species morphing transition if active
+    if (this.morphProgress < 1.0) {
+      this.morphProgress = Math.min(1.0, this.morphProgress + dt * 2.4);
+      const t = this.morphProgress;
+      const smoothT = t * t * (3 - 2 * t);
+
+      if (this.morphOutgoingModel && this.morphOutgoingModel !== this.activeFlowerModel) {
+        if (t >= 1.0) {
+          this.morphOutgoingModel.visible = false;
+          this.morphOutgoingModel.scale.setScalar(1.38);
+          this.morphOutgoingModel.rotation.y = 0;
+          this.morphOutgoingModel = null;
+        } else {
+          this.morphOutgoingModel.visible = true;
+          this.morphOutgoingModel.setBloom(bloom01 * (1 - smoothT * 0.85), elapsedSec);
+          this.morphOutgoingModel.scale.setScalar(1.38 * (1 - smoothT * 0.58));
+          this.morphOutgoingModel.rotation.y = smoothT * 0.65;
+        }
+      }
+
+      const incomingBloom = bloom01 * (0.25 + 0.75 * smoothT);
+      this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
+      this.activeFlowerModel.setBloom(incomingBloom, elapsedSec);
+      this.activeFlowerModel.scale.setScalar(1.38 * (0.48 + 0.52 * smoothT));
+      this.activeFlowerModel.rotation.y = -(1 - smoothT) * 0.55;
+    } else {
+      this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
+      this.activeFlowerModel.setBloom(bloom01, elapsedSec);
+      this.activeFlowerModel.scale.setScalar(1.38);
+      this.activeFlowerModel.rotation.y = 0;
+    }
+
+    // Apply unified 3-axis rotation to the whole botanical assembly (flower head + buds + stem + leaves + base)
+    // Default pitchX=0.58 corresponds to a gentle 0.24 rad (14°) whole-plant presentation tilt
+    this.flowerTiltGroup.rotation.x = pitchX - 0.34;
+    this.flowerTiltGroup.rotation.z = rollZ;
+    this.flowerPivotGroup.scale.setScalar(transitionScale);
+    this.flowerPivotGroup.rotation.set(0, yawY, 0);
+  }
+
   private registerAutomationHooks(): void {
     window.render_game_to_text = () => {
       const spec = FLOWER_LIBRARY[this.activeSpeciesIndex];
@@ -333,11 +384,14 @@ export class FloraXRScript extends xb.Script {
         bloomCurrentPercentage: Math.round(this.bloomSpring.value),
         handPose: classification?.pose ?? 'pinch-spread',
         handPoseLabelZh: classification?.labelZh ?? '',
+        mlCategoryName: classification?.mlCategoryName ?? '',
+        fingerExtensions: classification?.fingerExtensions ?? [0, 0, 0, 0, 0],
         isPinchGrabbing: Boolean(classification?.isPinchGrabbing),
+        unifiedPlantRotation: true,
+        morphProgress: Number(this.morphProgress.toFixed(2)),
         stageRotationPitchX: Number(this.pitchSpring.value.toFixed(2)),
         stageRotationYawY: Number(this.yawSpring.value.toFixed(2)),
         stageRotationRollZ: Number(this.rollSpring.value.toFixed(2)),
-        // Legacy aliases
         stageRotationYaw: Number(this.yawSpring.value.toFixed(2)),
         stageRotationPitch: Number(this.pitchSpring.value.toFixed(2)),
         autoRotateEnabled: this.autoRotateEnabled,
@@ -353,18 +407,19 @@ export class FloraXRScript extends xb.Script {
         const pitchX = this.pitchSpring.step(dt);
         const yawY = this.yawSpring.step(dt);
         const rollZ = this.rollSpring.step(dt);
-        this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
-        this.activeFlowerModel.setBloom(b, performance.now() / 1000);
-        this.flowerPivotGroup.scale.setScalar(s);
-        this.flowerPivotGroup.rotation.x = 0;
-        this.flowerPivotGroup.rotation.y = yawY;
-        this.flowerPivotGroup.rotation.z = 0;
-        this.handOverlay.updateRotationReadout(pitchX, yawY, rollZ);
-        this.environmentManager.updateEnvironment(
+        const nowSec = performance.now() / 1000;
+
+        this.applyUnifiedSpecimenTransforms(
           b,
-          performance.now() / 1000,
+          s,
+          pitchX,
+          yawY,
+          rollZ,
+          nowSec,
           dt,
         );
+        this.handOverlay.updateRotationReadout(pitchX, yawY, rollZ);
+        this.environmentManager.updateEnvironment(b, nowSec, dt);
       }
     };
 
@@ -441,6 +496,17 @@ export class FloraXRScript extends xb.Script {
     this.syncSpatialCardText();
   }
 
+  private getOrCreateFlowerModel(id: string): ProceduralFlowerModel {
+    let model = this.flowerModels.get(id);
+    if (!model) {
+      model = createFlowerById(id);
+      model.visible = false;
+      this.flowerModels.set(id, model);
+      this.flowerPivotGroup.add(model);
+    }
+    return model;
+  }
+
   selectSpecies(index: number): void {
     const safeIdx =
       ((index % FLOWER_LIBRARY.length) + FLOWER_LIBRARY.length) %
@@ -449,18 +515,29 @@ export class FloraXRScript extends xb.Script {
       return;
     }
 
+    const previousModel = this.activeFlowerModel;
     this.activeSpeciesIndex = safeIdx;
     const nextSpec = FLOWER_LIBRARY[safeIdx];
+    const nextModel = this.getOrCreateFlowerModel(nextSpec.id);
 
     for (const [id, model] of this.flowerModels.entries()) {
-      model.visible = id === nextSpec.id;
+      if (id !== nextSpec.id && model !== previousModel) {
+        model.visible = false;
+        model.scale.setScalar(1.38);
+        model.rotation.y = 0;
+      }
     }
-    this.activeFlowerModel = this.flowerModels.get(nextSpec.id)!;
 
-    this.transitionScaleSpring.value = 0.72;
-    this.transitionScaleSpring.velocity = 2.2;
+    this.morphOutgoingModel = previousModel;
+    this.morphProgress = 0.0;
+
+    this.activeFlowerModel = nextModel;
+    this.activeFlowerModel.visible = true;
+
+    this.transitionScaleSpring.value = 0.86;
+    this.transitionScaleSpring.velocity = 1.6;
     this.transitionScaleSpring.setTarget(1.0);
-    this.yawSpring.setTarget(this.yawSpring.target + 0.55);
+    this.yawSpring.setTarget(this.yawSpring.target + 0.48);
 
     this.environmentManager.triggerGestureBurst(nextSpec.primaryColor);
     this.handOverlay.updateActiveSpeciesUI(safeIdx);
@@ -526,12 +603,15 @@ export class FloraXRScript extends xb.Script {
     const currentYawY = this.yawSpring.step(dt);
     const currentRollZ = this.rollSpring.step(dt);
 
-    this.activeFlowerModel.setHeadOrientation(currentPitchX, currentRollZ);
-    this.activeFlowerModel.setBloom(bloom01, elapsedSec);
-    this.flowerPivotGroup.scale.setScalar(transitionScale);
-    this.flowerPivotGroup.rotation.x = 0;
-    this.flowerPivotGroup.rotation.y = currentYawY;
-    this.flowerPivotGroup.rotation.z = 0;
+    this.applyUnifiedSpecimenTransforms(
+      bloom01,
+      transitionScale,
+      currentPitchX,
+      currentYawY,
+      currentRollZ,
+      elapsedSec,
+      dt,
+    );
 
     this.handOverlay.updateRotationReadout(
       currentPitchX,

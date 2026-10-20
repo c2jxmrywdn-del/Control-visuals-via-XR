@@ -1,4 +1,8 @@
-import {FilesetResolver, HandLandmarker} from '@mediapipe/tasks-vision';
+import {
+  FilesetResolver,
+  GestureRecognizer,
+  HandLandmarker,
+} from '@mediapipe/tasks-vision';
 import {
   FLOWER_LIBRARY,
   ENVIRONMENT_LIBRARY,
@@ -9,6 +13,7 @@ import {
   type Point3D,
   type HandPoseClassification,
   type InteractionLogicMode,
+  type MLGestureHint,
 } from './gestureMath';
 
 const HAND_CONNECTIONS: Array<[number, number]> = [
@@ -100,6 +105,7 @@ export class HandTrackerOverlay {
   private envButtons: HTMLButtonElement[] = [];
   private logicModeButtons: HTMLButtonElement[] = [];
 
+  private gestureRecognizer: GestureRecognizer | null = null;
   private handLandmarker: HandLandmarker | null = null;
   private primaryDenoiser = new HandSignalDenoiser(true, 55);
   private secondaryDenoiser = new HandSignalDenoiser(true, 55);
@@ -150,8 +156,13 @@ export class HandTrackerOverlay {
     this.buildDOM();
     this.bindEvents();
     this.updateSimButtonsUI();
-    void this.initMediaPipeModel();
-    void this.tryAutoStartWebcam();
+    const isHeadless =
+      typeof navigator !== 'undefined' &&
+      (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
+    if (!isHeadless) {
+      void this.initMediaPipeModel();
+      void this.tryAutoStartWebcam();
+    }
   }
 
   private buildDOM(): void {
@@ -777,6 +788,17 @@ export class HandTrackerOverlay {
       this.sensitivityValEl.textContent = cal.profileLabelZh;
     }
 
+    if (this.gestureRecognizer) {
+      try {
+        void this.gestureRecognizer.setOptions({
+          minHandDetectionConfidence: cal.minHandConfidence,
+          minHandPresenceConfidence: cal.minHandConfidence,
+          minTrackingConfidence: cal.minHandConfidence,
+        });
+      } catch {
+        // Ignore if recognizer is busy mid-frame
+      }
+    }
     if (this.handLandmarker) {
       try {
         void this.handLandmarker.setOptions({
@@ -976,12 +998,54 @@ export class HandTrackerOverlay {
   }
 
   private async initMediaPipeModel(): Promise<void> {
-    if (this.mlLoading || this.handLandmarker) return;
+    if (this.mlLoading || this.gestureRecognizer || this.handLandmarker) return;
     this.mlLoading = true;
     try {
       const vision = await FilesetResolver.forVisionTasks(
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm',
       );
+      // 1. Primary ML Model: MediaPipe GestureRecognizer (Neural Gesture Classifier + 21-Point 3D Hand Landmarks)
+      try {
+        this.gestureRecognizer = await GestureRecognizer.createFromOptions(
+          vision,
+          {
+            baseOptions: {
+              modelAssetPath:
+                'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 2,
+            minHandDetectionConfidence: 0.48,
+            minHandPresenceConfidence: 0.48,
+            minTrackingConfidence: 0.48,
+          },
+        );
+        return;
+      } catch {
+        try {
+          this.gestureRecognizer = await GestureRecognizer.createFromOptions(
+            vision,
+            {
+              baseOptions: {
+                modelAssetPath:
+                  'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+                delegate: 'CPU',
+              },
+              runningMode: 'VIDEO',
+              numHands: 2,
+              minHandDetectionConfidence: 0.48,
+              minHandPresenceConfidence: 0.48,
+              minTrackingConfidence: 0.48,
+            },
+          );
+          return;
+        } catch {
+          // Fall through to HandLandmarker
+        }
+      }
+
+      // 2. Fallback ML Model: MediaPipe HandLandmarker (21-Point 3D Skeletal Regression)
       try {
         this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
@@ -991,9 +1055,9 @@ export class HandTrackerOverlay {
           },
           runningMode: 'VIDEO',
           numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minHandDetectionConfidence: 0.48,
+          minHandPresenceConfidence: 0.48,
+          minTrackingConfidence: 0.48,
         });
       } catch {
         this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
@@ -1004,14 +1068,14 @@ export class HandTrackerOverlay {
           },
           runningMode: 'VIDEO',
           numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minHandDetectionConfidence: 0.48,
+          minHandPresenceConfidence: 0.48,
+          minTrackingConfidence: 0.48,
         });
       }
     } catch (err) {
       console.warn(
-        'MediaPipe HandLandmarker fallback to interactive simulation:',
+        'MediaPipe ML model fallback to interactive simulation:',
         err,
       );
     } finally {
@@ -1183,17 +1247,45 @@ export class HandTrackerOverlay {
     // 1. Live Video / Webcam ML Hand Tracking Mode:
     if (this.webcamRunning || this.videoDemoRunning) {
       const nowMs = performance.now();
-      if (this.handLandmarker && this.videoEl.readyState >= 2) {
+      const hasMLModel = Boolean(this.gestureRecognizer || this.handLandmarker);
+      if (hasMLModel && this.videoEl.readyState >= 2) {
         if (this.videoEl.currentTime !== this.lastVideoTime) {
           this.lastVideoTime = this.videoEl.currentTime;
-          const result = this.handLandmarker.detectForVideo(
-            this.videoEl,
-            nowMs,
-          );
-          if (result.landmarks && result.landmarks.length > 0) {
+          let landmarks: Point3D[][] = [];
+          const mlHints: Array<MLGestureHint | null> = [];
+
+          if (this.gestureRecognizer) {
+            const gResult = this.gestureRecognizer.recognizeForVideo(
+              this.videoEl,
+              nowMs,
+            );
+            landmarks = gResult.landmarks || [];
+            for (let i = 0; i < landmarks.length; i++) {
+              const topGesture = gResult.gestures?.[i]?.[0];
+              const topHand = gResult.handednesses?.[i]?.[0];
+              mlHints.push(
+                topGesture
+                  ? {
+                      categoryName: topGesture.categoryName,
+                      score: topGesture.score,
+                      handedness:
+                        topHand?.categoryName === 'Left' ? 'Left' : 'Right',
+                    }
+                  : null,
+              );
+            }
+          } else if (this.handLandmarker) {
+            const hResult = this.handLandmarker.detectForVideo(
+              this.videoEl,
+              nowMs,
+            );
+            landmarks = hResult.landmarks || [];
+          }
+
+          if (landmarks.length > 0) {
             this.lastHandDetectedTimeMs = nowMs;
             this.handCurrentlyPresent = true;
-            this.processLiveHandResult(result.landmarks, nowMs, dt);
+            this.processLiveHandResult(landmarks, nowMs, dt, mlHints);
             return;
           }
         } else if (
@@ -1261,7 +1353,7 @@ export class HandTrackerOverlay {
     if (this.simulatedPinchGrabActive) {
       this.currentClassification.pose = 'pinch-grab';
       this.currentClassification.isPinchGrabbing = true;
-      this.currentClassification.labelZh = '捏合抓取 · 移动旋转(X/Y/Z轴)';
+      this.currentClassification.labelZh = 'OK捏合抓取 · 移动旋转(X/Y/Z轴)';
     }
     this.currentClassification.bloomPercentage = Math.round(
       this.simulatedPinchSpread * 100,
@@ -1273,26 +1365,28 @@ export class HandTrackerOverlay {
     hands: Point3D[][],
     nowMs: number,
     dt: number,
+    mlHints: Array<MLGestureHint | null> = [],
   ): void {
-    const rawMirroredHands: Point3D[][] = hands.map((h) =>
-      h.map((pt) => ({x: 1 - pt.x, y: pt.y, z: pt.z})),
-    );
+    const paired = hands.map((h, idx) => ({
+      pts: h.map((pt) => ({x: 1 - pt.x, y: pt.y, z: pt.z})),
+      hint: mlHints[idx] ?? null,
+    }));
 
-    rawMirroredHands.sort((a, b) => b[0].x - a[0].x);
+    paired.sort((a, b) => b.pts[0].x - a.pts[0].x);
 
     const primarySmoothed = this.primaryDenoiser.filterLandmarks(
-      rawMirroredHands[0],
+      paired[0].pts,
       nowMs,
     );
     const smoothedHands: Point3D[][] = [primarySmoothed];
-    if (rawMirroredHands.length >= 2) {
+    if (paired.length >= 2) {
       smoothedHands.push(
-        this.secondaryDenoiser.filterLandmarks(rawMirroredHands[1], nowMs),
+        this.secondaryDenoiser.filterLandmarks(paired[1].pts, nowMs),
       );
     }
     this.lastDetectedHands = smoothedHands;
 
-    const rawPrimaryClass = classifyHandPose(primarySmoothed);
+    const rawPrimaryClass = classifyHandPose(primarySmoothed, paired[0].hint);
     const classification = this.primaryDenoiser.stabilizeClassification(
       rawPrimaryClass,
       dt,
@@ -1705,6 +1799,44 @@ export class HandTrackerOverlay {
       ctx.stroke();
       ctx.restore();
     }
+    // Draw 5-Finger Biomechanical Extension Telemetry Bars (拇 · 食 · 中 · 无 · 小) in top-left of canvas
+    const exts = classification.fingerExtensions ?? [
+      classification.bloomPercentage / 100,
+      classification.bloomPercentage / 100,
+      classification.bloomPercentage / 100,
+      classification.bloomPercentage / 100,
+      classification.bloomPercentage / 100,
+    ];
+    const fingerNames = ['拇', '食', '中', '无', '小'];
+    ctx.save();
+    ctx.fillStyle = 'rgba(12, 10, 18, 0.82)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(8, 8, 98, 44, 5);
+    ctx.fill();
+    ctx.stroke();
+
+    for (let fIdx = 0; fIdx < 5; fIdx++) {
+      const bx = 15 + fIdx * 17;
+      const by = 14;
+      const bh = 22;
+      const bw = 9;
+      const val = clamp(exts[fIdx] ?? 0, 0, 1);
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+      ctx.fillRect(bx, by, bw, bh);
+
+      const fillH = Math.max(2, Math.round(bh * val));
+      ctx.fillStyle = val > 0.55 ? '#4ade80' : '#facc15';
+      ctx.fillRect(bx, by + bh - fillH, bw, fillH);
+
+      ctx.fillStyle = 'rgba(246, 243, 238, 0.78)';
+      ctx.font = '500 8.5px "Noto Sans SC", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(fingerNames[fIdx], bx + bw * 0.5, by + bh + 9);
+    }
+    ctx.restore();
   }
 
   getCurrentBloomPercentage(): number {
@@ -1718,6 +1850,7 @@ export class HandTrackerOverlay {
   dispose(): void {
     const stream = this.videoEl?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((t) => t.stop());
+    this.gestureRecognizer?.close();
     this.handLandmarker?.close();
     this.rootEl?.remove();
   }

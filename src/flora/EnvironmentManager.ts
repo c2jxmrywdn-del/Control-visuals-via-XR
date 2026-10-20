@@ -65,14 +65,18 @@ export class EnvironmentManager extends THREE.Group {
     this.hemiLight.position.set(0, 3.5, -1.08);
     this.add(this.hemiLight);
 
-    // 2. UE5 Key Sun / Softbox Directional Light with 2048x2048 Contact-Hardened Shadow Frustum
+    const isHeadless =
+      typeof navigator !== 'undefined' &&
+      (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
+
+    // 2. UE5 Key Sun / Softbox Directional Light with Contact-Hardened Shadow Frustum
     this.keyLight = new THREE.DirectionalLight(
       this.currentSpec.keyLightHex,
       1.38,
     );
     this.keyLight.position.set(1.45, 2.75, 0.45);
-    this.keyLight.castShadow = true;
-    this.keyLight.shadow.mapSize.set(2048, 2048);
+    this.keyLight.castShadow = !isHeadless;
+    this.keyLight.shadow.mapSize.set(isHeadless ? 512 : 2048, isHeadless ? 512 : 2048);
     this.keyLight.shadow.camera.near = 0.5;
     this.keyLight.shadow.camera.far = 4.5;
     this.keyLight.shadow.camera.left = -0.58;
@@ -122,7 +126,7 @@ export class EnvironmentManager extends THREE.Group {
     this.buildVolumetricGodRays();
 
     this.pedestalGroup = new THREE.Group();
-    this.pedestalGroup.position.set(0, 0.82, -1.08);
+    this.pedestalGroup.position.set(0, 0.68, -1.08);
     this.pedestalGroup.xb = {pointerEvents: 'none'};
     this.add(this.pedestalGroup);
     this.buildPedestalAndRipples();
@@ -306,15 +310,23 @@ export class EnvironmentManager extends THREE.Group {
     scene: THREE.Scene,
   ): void {
     try {
+      const isHeadless =
+        typeof navigator !== 'undefined' &&
+        (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
       this.sceneRef = scene;
-      renderer.shadowMap.enabled = true;
+      renderer.setPixelRatio(
+        isHeadless ? 1 : Math.min(window.devicePixelRatio || 1, 2),
+      );
+      renderer.shadowMap.enabled = !isHeadless;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 0.86;
 
-      this.pmremGenerator = new THREE.PMREMGenerator(renderer);
-      this.pmremGenerator.compileEquirectangularShader();
-      this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
+      if (!isHeadless) {
+        this.pmremGenerator = new THREE.PMREMGenerator(renderer);
+        this.pmremGenerator.compileEquirectangularShader();
+        this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
+      }
 
       scene.background = this.currentBgColor;
       scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.11);
