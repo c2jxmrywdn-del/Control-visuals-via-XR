@@ -154,6 +154,35 @@ export class FloraXRScript extends xb.Script {
       onChangeGaussianSplatMode: (mode) => {
         this.setGaussianSplatMode(mode);
       },
+      onGetPresetSnapshot: () => ({
+        speciesId: FLOWER_LIBRARY[this.activeSpeciesIndex].id,
+        environmentId: ENVIRONMENT_LIBRARY[this.activeEnvIndex].id,
+        bloomPct: Math.round(this.bloomSpring.target),
+        pitchRad: Number(this.pitchSpring.target.toFixed(4)),
+        yawRad: Number(this.yawSpring.target.toFixed(4)),
+        rollRad: Number(this.rollSpring.target.toFixed(4)),
+        gaussianSplatMode: this.gaussianSplatMode,
+        sensitivityPct: this.handOverlay?.getSensitivity() ?? 55,
+      }),
+      onApplyCloudPreset: (preset) => {
+        const sIdx = FLOWER_LIBRARY.findIndex((f) => f.id === preset.speciesId);
+        if (sIdx >= 0) {
+          this.selectSpecies(sIdx);
+        }
+        const eIdx = ENVIRONMENT_LIBRARY.findIndex(
+          (e) => e.id === preset.environmentId,
+        );
+        if (eIdx >= 0) {
+          this.selectEnvironment(eIdx);
+        }
+        this.handOverlay?.setSimulatedBloom(preset.bloomPct);
+        this.handOverlay?.setSensitivity(preset.sensitivityPct, false);
+        this.handOverlay?.setGaussianSplatModeUI(preset.gaussianSplatMode, false);
+        this.setGaussianSplatMode(preset.gaussianSplatMode);
+        this.pitchSpring.setTarget(preset.pitchRad);
+        this.yawSpring.setTarget(preset.yawRad);
+        this.rollSpring.setTarget(preset.rollRad);
+      },
       onEnterXR: () => {
         this.triggerEnterXRSession();
       },
@@ -403,6 +432,11 @@ export class FloraXRScript extends xb.Script {
         unifiedPlantRotation: true,
         gaussianSplatMode: this.gaussianSplatMode,
         gaussianSplatCount: this.activeFlowerModel?.getGaussianSplatCount() ?? 0,
+        firebaseReady: true,
+        cloudSyncState: this.handOverlay?.getCloudSyncState() ?? {
+          authenticated: false,
+          presetCount: 0,
+        },
         morphProgress: Number(this.morphProgress.toFixed(2)),
         stageRotationPitchX: Number(this.pitchSpring.value.toFixed(2)),
         stageRotationYawY: Number(this.yawSpring.value.toFixed(2)),

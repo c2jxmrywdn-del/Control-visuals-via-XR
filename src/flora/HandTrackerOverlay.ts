@@ -19,6 +19,16 @@ import {
   type MLGestureHint,
   type GaussianSplatMode,
 } from './gestureMath';
+import {
+  signInWithGooglePopup,
+  signOutFromFlora,
+  subscribeToAuthChanges,
+  subscribeToUserPresets,
+  saveBotanicalPresetToCloud,
+  archiveBotanicalPresetInCloud,
+  type SavedBotanicalPreset,
+} from './firebaseClient';
+import type {User} from 'firebase/auth';
 
 const HAND_CONNECTIONS: Array<[number, number]> = [
   [0, 1],
@@ -71,6 +81,17 @@ export interface HandTrackerCallbacks {
     resetAxes?: boolean,
   ) => void;
   onChangeGaussianSplatMode?: (mode: GaussianSplatMode) => void;
+  onGetPresetSnapshot?: () => {
+    speciesId: string;
+    environmentId: string;
+    bloomPct: number;
+    pitchRad: number;
+    yawRad: number;
+    rollRad: number;
+    gaussianSplatMode: GaussianSplatMode;
+    sensitivityPct: number;
+  };
+  onApplyCloudPreset?: (preset: SavedBotanicalPreset) => void;
   onEnterXR?: () => void;
 }
 
@@ -155,6 +176,11 @@ export class HandTrackerOverlay {
   private frameSamplerCtx: CanvasRenderingContext2D;
   private customPoseLandmarks: Point3D[] | null = null;
   private lastInferenceLatencyMs = 0.4;
+  private currentUser: User | null = null;
+  private cloudPresets: SavedBotanicalPreset[] = [];
+  private unsubAuth: (() => void) | null = null;
+  private unsubPresets: (() => void) | null = null;
+  private cloudDrawerOpen = false;
 
   constructor(callbacks: HandTrackerCallbacks) {
     this.callbacks = callbacks;
@@ -171,6 +197,7 @@ export class HandTrackerOverlay {
     this.currentClassification = classifyHandPose(initialLandmarks);
     this.buildDOM();
     this.bindEvents();
+    this.initFirebaseCloudSync();
     this.updateSimButtonsUI();
     const isHeadless =
       typeof navigator !== 'undefined' &&
@@ -229,6 +256,9 @@ export class HandTrackerOverlay {
           <button type="button" id="flora-auto-btn" class="flora-action-btn" title="在未开启摄像头时，开启或关闭自动手势演示">
             <span>模拟: 手动控制</span>
           </button>
+          <button type="button" id="flora-cloud-btn" class="flora-action-btn" title="Firebase 云端花谱同步：保存与加载 3D 花姿预设">
+            <span id="flora-cloud-btn-label">☁️ 云端花谱</span>
+          </button>
           <button type="button" id="flora-cam-btn" class="flora-action-btn flora-action-btn-cam" title="开启或关闭真实摄像头手部追踪">
             <span id="flora-cam-btn-label">开启摄像头</span>
           </button>
@@ -237,6 +267,32 @@ export class HandTrackerOverlay {
           </button>
         </div>
       </header>
+
+      <!-- Firebase Cloud Botanical Presets Drawer -->
+      <section id="flora-cloud-drawer" aria-label="Firebase Cloud Botanical Presets" style="display:none; position:fixed; top:58px; right:18px; width:340px; z-index:45; background:rgba(14,12,20,0.94); border:1px solid rgba(212,175,55,0.36); border-radius:12px; padding:12px 14px; flex-direction:column; gap:10px; box-shadow:0 16px 40px rgba(0,0,0,0.65); backdrop-filter:blur(14px); pointer-events:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:12.5px; font-weight:600; color:#fef08a;">☁️ Firebase 云端花谱库 (Firestore)</span>
+          <span id="flora-auth-status" style="font-size:11px; color:#94a3b8; background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:6px;">未登录</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="flora-auth-signin-btn" class="flora-mini-btn flora-mini-btn-accent" style="flex:1;">Google 账号登录</button>
+          <button type="button" id="flora-auth-signout-btn" class="flora-mini-btn" style="display:none; flex:1;">退出登录</button>
+        </div>
+        <div id="flora-cloud-save-form" style="display:none; gap:6px; align-items:center;">
+          <input
+            id="flora-preset-title-input"
+            type="text"
+            maxlength="64"
+            placeholder="输入花姿名称 (如: 九品粉莲·盛放)"
+            aria-label="云端花姿预设名称"
+            style="flex:1; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:5px 8px; color:#f8fafc; font-size:12px; outline:none;"
+          />
+          <button type="button" id="flora-save-preset-btn" class="flora-mini-btn flora-mini-btn-accent">💾 保存花姿</button>
+        </div>
+        <div id="flora-cloud-presets-list" style="display:flex; flex-direction:column; gap:6px; max-height:190px; overflow-y:auto; font-size:11.5px; color:#cbd5e1;">
+          <div style="opacity:0.75; line-height:1.45;">登录 Google 账号后即可将当前 3D 花姿、绽放度与 3DGS 模式同步至云端</div>
+        </div>
+      </section>
 
       <!-- Left Botanical Editorial Specimen Info -->
       <aside class="flora-left-editorial">
@@ -1981,6 +2037,177 @@ export class HandTrackerOverlay {
     ctx.restore();
   }
 
+  private initFirebaseCloudSync(): void {
+    const cloudBtn = document.getElementById('flora-cloud-btn');
+    const cloudDrawer = document.getElementById('flora-cloud-drawer');
+    const signInBtn = document.getElementById('flora-auth-signin-btn');
+    const signOutBtn = document.getElementById('flora-auth-signout-btn');
+    const savePresetBtn = document.getElementById('flora-save-preset-btn');
+    const titleInput = document.getElementById(
+      'flora-preset-title-input',
+    ) as HTMLInputElement | null;
+
+    cloudBtn?.addEventListener('click', () => {
+      this.cloudDrawerOpen = !this.cloudDrawerOpen;
+      if (cloudDrawer) {
+        cloudDrawer.style.display = this.cloudDrawerOpen ? 'flex' : 'none';
+      }
+      cloudBtn.classList.toggle('active', this.cloudDrawerOpen);
+    });
+
+    signInBtn?.addEventListener('click', () => {
+      void signInWithGooglePopup()
+        .then((user) => {
+          if (user) {
+            this.showGestureToast(`已登录云端花谱: ${user.displayName || user.email || 'Botanist'}`);
+          }
+        })
+        .catch((err) => {
+          console.warn('Google sign-in popup dismissed or failed:', err);
+          this.showGestureToast('Google 登录已取消或受浏览器弹窗限制');
+        });
+    });
+
+    signOutBtn?.addEventListener('click', () => {
+      void signOutFromFlora().then(() => {
+        this.showGestureToast('已退出云端花谱账号');
+      });
+    });
+
+    savePresetBtn?.addEventListener('click', () => {
+      if (!this.currentUser) {
+        this.showGestureToast('请先登录 Google 账号再保存云端花姿');
+        return;
+      }
+      const snap = this.callbacks.onGetPresetSnapshot?.();
+      if (!snap) return;
+      const spec = FLOWER_LIBRARY[this.activeSpeciesIndex];
+      const defaultTitle = `${spec.nameZh} · ${snap.bloomPct}%`;
+      const rawTitle = titleInput?.value.trim() || defaultTitle;
+
+      void saveBotanicalPresetToCloud(this.currentUser, {
+        title: rawTitle.slice(0, 64),
+        ...snap,
+      })
+        .then(() => {
+          if (titleInput) titleInput.value = '';
+          this.showGestureToast(`已保存至 Firebase 云端: 「${rawTitle.slice(0, 24)}」`);
+        })
+        .catch((err) => {
+          console.error('Failed to save preset:', err);
+          this.showGestureToast('云端保存失败，请检查权限或网络连接');
+        });
+    });
+
+    this.unsubAuth = subscribeToAuthChanges((user) => {
+      this.currentUser = user;
+      if (this.unsubPresets) {
+        this.unsubPresets();
+        this.unsubPresets = null;
+      }
+      const statusEl = document.getElementById('flora-auth-status');
+      const saveForm = document.getElementById('flora-cloud-save-form');
+      const cloudLabel = document.getElementById('flora-cloud-btn-label');
+
+      if (user) {
+        const label = user.displayName || user.email?.split('@')[0] || '已认证';
+        if (statusEl) statusEl.textContent = `已登录: ${label.slice(0, 18)}`;
+        if (signInBtn) signInBtn.style.display = 'none';
+        if (signOutBtn) signOutBtn.style.display = 'inline-flex';
+        if (saveForm) saveForm.style.display = 'flex';
+        this.unsubPresets = subscribeToUserPresets(user, (presets) => {
+          this.cloudPresets = presets;
+          if (cloudLabel) {
+            cloudLabel.textContent = `☁️ 云端花谱 (${presets.length})`;
+          }
+          this.renderCloudPresetsList();
+        });
+      } else {
+        this.cloudPresets = [];
+        if (statusEl) statusEl.textContent = '未登录';
+        if (signInBtn) signInBtn.style.display = 'inline-flex';
+        if (signOutBtn) signOutBtn.style.display = 'none';
+        if (saveForm) saveForm.style.display = 'none';
+        if (cloudLabel) cloudLabel.textContent = '☁️ 云端花谱';
+        this.renderCloudPresetsList();
+      }
+    });
+  }
+
+  private renderCloudPresetsList(): void {
+    const listEl = document.getElementById('flora-cloud-presets-list');
+    if (!listEl) return;
+
+    if (!this.currentUser) {
+      listEl.innerHTML =
+        '<div class="flora-cloud-empty">登录 Google 账号后即可将当前 3D 花姿、绽放度与 3DGS 模式同步至云端</div>';
+      return;
+    }
+
+    if (this.cloudPresets.length === 0) {
+      listEl.innerHTML =
+        '<div class="flora-cloud-empty">暂无云端花谱，点击上方「💾 保存当前花姿」即可创建第一条云端记录</div>';
+      return;
+    }
+
+    listEl.innerHTML = this.cloudPresets
+      .map(
+        (p, idx) => `
+        <div class="flora-cloud-item" data-preset-idx="${idx}">
+          <div class="flora-cloud-item-info">
+            <span class="flora-cloud-item-title">${p.title.replace(/</g, '&lt;')}</span>
+            <span class="flora-cloud-item-meta">${p.speciesId} · ${p.bloomPct}% · ${p.gaussianSplatMode}</span>
+          </div>
+          <div class="flora-cloud-item-btns">
+            <button type="button" class="flora-rot-chip" data-apply-preset="${idx}">应用</button>
+            <button type="button" class="flora-rot-chip" data-archive-preset="${idx}">归档</button>
+          </div>
+        </div>
+      `,
+      )
+      .join('');
+
+    listEl
+      .querySelectorAll<HTMLButtonElement>('[data-apply-preset]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.applyPreset || 0);
+          const target = this.cloudPresets[idx];
+          if (target) {
+            this.callbacks.onApplyCloudPreset?.(target);
+            this.showGestureToast(`已加载云端花姿: 「${target.title}」`);
+          }
+        });
+      });
+
+    listEl
+      .querySelectorAll<HTMLButtonElement>('[data-archive-preset]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.archivePreset || 0);
+          const target = this.cloudPresets[idx];
+          if (target && this.currentUser) {
+            void archiveBotanicalPresetInCloud(
+              this.currentUser,
+              target.presetId,
+            ).then(() => {
+              this.showGestureToast(`已归档云端花姿: 「${target.title}」`);
+            });
+          }
+        });
+      });
+  }
+
+  getCloudSyncState(): {
+    authenticated: boolean;
+    presetCount: number;
+  } {
+    return {
+      authenticated: Boolean(this.currentUser),
+      presetCount: this.cloudPresets.length,
+    };
+  }
+
   getCurrentBloomPercentage(): number {
     return this.currentClassification.bloomPercentage;
   }
@@ -1990,6 +2217,8 @@ export class HandTrackerOverlay {
   }
 
   dispose(): void {
+    this.unsubPresets?.();
+    this.unsubAuth?.();
     const stream = this.videoEl?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((t) => t.stop());
     this.gestureRecognizer?.close();

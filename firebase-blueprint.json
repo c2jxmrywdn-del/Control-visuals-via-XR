@@ -1,0 +1,218 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Public botanical studio profile for an authenticated user without PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Authenticated user UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Sanitized display name shown in the botanical studio header.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "preferredSpeciesId": {
+          "type": "string",
+          "description": "Default flower species ID selected by the user.",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "preferredSpeciesId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII document storing the user's verified email address.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner user UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified user email address isolated from public profile.",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BotanicalPreset": {
+      "title": "BotanicalPreset",
+      "description": "Saved 3D botanical posture, bloom aperture, lighting sanctuary, and 3DGS mode preset.",
+      "type": "object",
+      "properties": {
+        "presetId": {
+          "type": "string",
+          "description": "Unique alphanumeric identifier matching the preset document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Immutable UID of the preset creator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable name for the saved floral scene preset.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "speciesId": {
+          "type": "string",
+          "description": "Botanical species identifier.",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "environmentId": {
+          "type": "string",
+          "description": "Sanctuary lighting environment identifier.",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "bloomPct": {
+          "type": "number",
+          "description": "Corolla bloom percentage from 0 to 100."
+        },
+        "pitchRad": {
+          "type": "number",
+          "description": "Whole-plant X-axis pitch angle in radians."
+        },
+        "yawRad": {
+          "type": "number",
+          "description": "Whole-plant Y-axis yaw angle in radians."
+        },
+        "rollRad": {
+          "type": "number",
+          "description": "Whole-plant Z-axis roll angle in radians."
+        },
+        "gaussianSplatMode": {
+          "type": "string",
+          "description": "Active 3D Gaussian Splatting rendering mode.",
+          "enum": [
+            "hybrid-3dgs",
+            "pure-3dgs",
+            "pbr-mesh"
+          ],
+          "minLength": 8,
+          "maxLength": 16
+        },
+        "sensitivityPct": {
+          "type": "number",
+          "description": "ML gesture recognition sensitivity percentage from 20 to 100."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Bounded list of up to 5 descriptive tags."
+        },
+        "status": {
+          "type": "string",
+          "description": "Lifecycle status of the preset ('active' or terminal 'archived').",
+          "enum": [
+            "active",
+            "archived"
+          ],
+          "minLength": 6,
+          "maxLength": 12
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "presetId",
+        "ownerId",
+        "title",
+        "speciesId",
+        "environmentId",
+        "bloomPct",
+        "pitchRad",
+        "yawRad",
+        "rollRad",
+        "gaussianSplatMode",
+        "sensitivityPct",
+        "tags",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserPublicProfile"
+      },
+      "description": "Stores public non-PII botanical studio profile for each authenticated user."
+    },
+    "/users/{userId}/private/{infoId}": {
+      "schema": {
+        "$ref": "#/entities/UserPrivateInfo"
+      },
+      "description": "Isolated subcollection for user PII (verified email) accessible strictly by the owner."
+    },
+    "/users/{userId}/presets/{presetId}": {
+      "schema": {
+        "$ref": "#/entities/BotanicalPreset"
+      },
+      "description": "User-owned 3D botanical presets governed by parent /users/{userId} Master Gate."
+    }
+  }
+}
