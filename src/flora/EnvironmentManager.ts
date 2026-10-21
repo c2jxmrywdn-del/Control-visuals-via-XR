@@ -322,7 +322,17 @@ export class EnvironmentManager extends THREE.Group {
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 0.86;
 
-      if (!isHeadless) {
+      if (isHeadless) {
+        // Pace software WebGL (SwiftShader) render calls so Playwright screenshots never starve
+        const origRender = renderer.render.bind(renderer);
+        let lastDrawMs = 0;
+        renderer.render = (s: THREE.Scene, c: THREE.Camera) => {
+          const now = performance.now();
+          if (now - lastDrawMs < 85) return;
+          lastDrawMs = now;
+          origRender(s, c);
+        };
+      } else {
         this.pmremGenerator = new THREE.PMREMGenerator(renderer);
         this.pmremGenerator.compileEquirectangularShader();
         this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
@@ -336,6 +346,9 @@ export class EnvironmentManager extends THREE.Group {
   }
 
   private buildPedestalAndRipples(): void {
+    const isHeadless =
+      typeof navigator !== 'undefined' &&
+      (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
     // Stepped UE5 Architectural Obsidian Sanctuary Basin
     const basinProfile = [
       new THREE.Vector2(0.0, -0.045),
@@ -364,7 +377,7 @@ export class EnvironmentManager extends THREE.Group {
       color: this.currentSpec.groundHex,
       roughness: 0.05,
       metalness: 0.12,
-      transmission: 0.25,
+      transmission: isHeadless ? 0.0 : 0.25,
       ior: 1.333,
       clearcoat: 1.0,
       clearcoatRoughness: 0.04,

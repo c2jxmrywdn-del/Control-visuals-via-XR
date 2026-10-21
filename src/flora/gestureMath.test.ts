@@ -17,6 +17,9 @@ import {
   computeFloralShellEnvelope,
   evaluateOrganPitchAtBloom,
   evaluateStamenPitchAtBloom,
+  evaluateSphericalHarmonicsRadiance,
+  compute2DGaussianSplatCovariance,
+  evaluateGaussianSplatKernel2D,
   type Point3D,
 } from './gestureMath.ts';
 
@@ -455,4 +458,38 @@ test('computeFloralShellEnvelope and evaluateOrganPitchAtBloom guarantee strictl
     }
   }
 });
+
+test('3D Gaussian Splatting (3DGS) EWA covariance projection, Gaussian kernel, and Spherical Harmonics radiance behave accurately', () => {
+  const cov = compute2DGaussianSplatCovariance([0.02, 0.012, 0.002], 800, 800, -1.1, 0.25);
+  assert.ok(cov.det > 0, '2D covariance determinant must be strictly positive');
+  assert.ok(
+    cov.majorAxis >= cov.minorAxis && cov.minorAxis > 1.0,
+    'Anisotropic 2D covariance must have majorAxis >= minorAxis > 1px anti-aliasing bound',
+  );
+
+  const centerAlpha = evaluateGaussianSplatKernel2D(0, 0, cov, 0.85);
+  const midAlpha = evaluateGaussianSplatKernel2D(cov.minorAxis * 0.3, 0, cov, 0.85);
+  const farAlpha = evaluateGaussianSplatKernel2D(cov.majorAxis * 2.5, cov.majorAxis * 2.5, cov, 0.85);
+  assert.ok(Math.abs(centerAlpha - 0.85) < 1e-4, 'Gaussian kernel at center (0,0) equals baseOpacity');
+  assert.ok(midAlpha < centerAlpha && midAlpha > 0, 'Gaussian kernel decays smoothly away from center');
+  assert.equal(farAlpha, 0, 'Gaussian kernel culls alpha below 1/255 cutoff at far tail');
+
+  const shFaceOn = evaluateSphericalHarmonicsRadiance(
+    [0.82, 0.28, 0.48],
+    [0.45, 0.22, 0.35],
+    [0, 0, 1],
+    [0, 0, 1],
+  );
+  const shGrazing = evaluateSphericalHarmonicsRadiance(
+    [0.82, 0.28, 0.48],
+    [0.45, 0.22, 0.35],
+    [0, 0, 1],
+    [1, 0, 0],
+  );
+  assert.ok(
+    shGrazing[0] > shFaceOn[0] && shGrazing[2] > shFaceOn[2],
+    'Spherical Harmonics + epidermal velvet Fresnel boosts subsurface radiance at grazing angles',
+  );
+});
+
 

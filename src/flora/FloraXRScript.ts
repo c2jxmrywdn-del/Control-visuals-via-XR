@@ -8,6 +8,7 @@ import {
   type HandPoseLabel,
   type HandPoseClassification,
   type InteractionLogicMode,
+  type GaussianSplatMode,
 } from './gestureMath';
 import {ProceduralFlowerModel, createFlowerById} from './FlowerModels';
 import {EnvironmentManager} from './EnvironmentManager';
@@ -27,6 +28,7 @@ declare global {
       rotateFlower: (yawRad: number, pitchRad: number, rollRad?: number) => void;
       simulatePinchDrag: (dx: number, dy: number, dz?: number) => void;
       triggerPresetPose: (pose: HandPoseLabel, aperture01?: number) => HandPoseClassification;
+      setGaussianSplatMode: (mode: GaussianSplatMode) => void;
       startVideoDemo: () => Promise<void>;
     };
   }
@@ -51,13 +53,14 @@ export class FloraXRScript extends xb.Script {
 
   private activeSpeciesIndex = 0;
   private activeEnvIndex = 0;
+  private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
 
-  private readonly bloomSpring = new SpringDamper(78, 110, 22);
-  private readonly transitionScaleSpring = new SpringDamper(1.0, 170, 20);
+  private readonly bloomSpring = new SpringDamper(78, 84, 15);
+  private readonly transitionScaleSpring = new SpringDamper(1.0, 145, 16);
   // Unified whole-plant 3-Axis (X: Pitch, Y: Yaw, Z: Roll) spring dampers
-  private readonly pitchSpring = new SpringDamper(0.58, 82, 18);
-  private readonly yawSpring = new SpringDamper(0, 82, 18);
-  private readonly rollSpring = new SpringDamper(0, 82, 18);
+  private readonly pitchSpring = new SpringDamper(0.58, 76, 16);
+  private readonly yawSpring = new SpringDamper(0, 76, 16);
+  private readonly rollSpring = new SpringDamper(0, 76, 16);
 
   private autoRotateEnabled = true;
   private autoRotateSpeed = 0.34;
@@ -147,6 +150,9 @@ export class FloraXRScript extends xb.Script {
               : clamp(this.rollSpring.target + deltaRoll, -1.35, 1.35);
           this.rollSpring.setTarget(nextRoll);
         }
+      },
+      onChangeGaussianSplatMode: (mode) => {
+        this.setGaussianSplatMode(mode);
       },
       onEnterXR: () => {
         this.triggerEnterXRSession();
@@ -358,10 +364,13 @@ export class FloraXRScript extends xb.Script {
       this.activeFlowerModel.rotation.y = 0;
     }
 
-    // Apply unified 3-axis rotation to the whole botanical assembly (flower head + buds + stem + leaves + base)
-    // Default pitchX=0.58 corresponds to a gentle 0.24 rad (14°) whole-plant presentation tilt
-    this.flowerTiltGroup.rotation.x = pitchX - 0.34;
-    this.flowerTiltGroup.rotation.z = rollZ;
+    // Apply unified 3-axis rotation + gentle living breeze sway to the whole botanical assembly
+    // (flower head + buds + stem + leaves + base always move and rotate in 100% unison)
+    const breezePitch = Math.sin(elapsedSec * 0.92) * 0.012;
+    const breezeRoll = Math.cos(elapsedSec * 0.78) * 0.012;
+    this.flowerStageGroup.position.y = 1.22 + Math.sin(elapsedSec * 1.25) * 0.005;
+    this.flowerTiltGroup.rotation.x = pitchX - 0.34 + breezePitch;
+    this.flowerTiltGroup.rotation.z = rollZ + breezeRoll;
     this.flowerPivotGroup.scale.setScalar(transitionScale);
     this.flowerPivotGroup.rotation.set(0, yawY, 0);
   }
@@ -392,6 +401,8 @@ export class FloraXRScript extends xb.Script {
         fingerExtensions: classification?.fingerExtensions ?? [0, 0, 0, 0, 0],
         isPinchGrabbing: Boolean(classification?.isPinchGrabbing),
         unifiedPlantRotation: true,
+        gaussianSplatMode: this.gaussianSplatMode,
+        gaussianSplatCount: this.activeFlowerModel?.getGaussianSplatCount() ?? 0,
         morphProgress: Number(this.morphProgress.toFixed(2)),
         stageRotationPitchX: Number(this.pitchSpring.value.toFixed(2)),
         stageRotationYawY: Number(this.yawSpring.value.toFixed(2)),
@@ -457,10 +468,21 @@ export class FloraXRScript extends xb.Script {
       triggerPresetPose: (pose: HandPoseLabel, aperture01 = 0.5) => {
         return this.handOverlay.triggerPresetPose(pose, aperture01);
       },
+      setGaussianSplatMode: (mode: GaussianSplatMode) => {
+        this.setGaussianSplatMode(mode);
+        this.handOverlay.setGaussianSplatModeUI(mode, false);
+      },
       startVideoDemo: async () => {
         await this.handOverlay.toggleUploadedVideoDemo();
       },
     };
+  }
+
+  setGaussianSplatMode(mode: GaussianSplatMode): void {
+    this.gaussianSplatMode = mode;
+    for (const model of this.flowerModels.values()) {
+      model.setGaussianSplatMode(mode);
+    }
   }
 
   onXRSessionStarted(): void {
@@ -507,6 +529,7 @@ export class FloraXRScript extends xb.Script {
     let model = this.flowerModels.get(id);
     if (!model) {
       model = createFlowerById(id);
+      model.setGaussianSplatMode(this.gaussianSplatMode);
       model.visible = false;
       this.flowerModels.set(id, model);
       this.flowerPivotGroup.add(model);

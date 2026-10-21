@@ -2142,3 +2142,138 @@ export function analyzeVideoFramePixels(
   };
 }
 
+export type GaussianSplatMode = 'hybrid-3dgs' | 'pure-3dgs' | 'pbr-mesh';
+
+export interface GaussianSplat2DCovariance {
+  a: number;
+  b: number;
+  c: number;
+  majorAxis: number;
+  minorAxis: number;
+  det: number;
+}
+
+/**
+ * Evaluates 3D Gaussian Splatting (3DGS) view-dependent Spherical Harmonics (SH Degree 1 & 2)
+ * radiance C(d) for a botanical Gaussian splat given camera view direction `viewDir` and
+ * local organ normal `normalDir`.
+ */
+export function evaluateSphericalHarmonicsRadiance(
+  sh0Rgb: [number, number, number],
+  sh1TintRgb: [number, number, number],
+  viewDir: [number, number, number],
+  normalDir: [number, number, number],
+): [number, number, number] {
+  const vx = viewDir[0];
+  const vy = viewDir[1];
+  const vz = viewDir[2];
+  const vLen = Math.hypot(vx, vy, vz) || 1;
+  const dx = vx / vLen;
+  const dy = vy / vLen;
+  const dz = vz / vLen;
+
+  const nx = normalDir[0];
+  const ny = normalDir[1];
+  const nz = normalDir[2];
+  const nLen = Math.hypot(nx, ny, nz) || 1;
+  const ndx = nx / nLen;
+  const ndy = ny / nLen;
+  const ndz = nz / nLen;
+
+  // Real Spherical Harmonics basis constants (Kerbl et al. 2023)
+  const SH_C1 = 0.4886025119029199;
+  const SH_C2_0 = 1.0925484305920792;
+  const SH_C2_1 = 0.31539156525252005;
+
+  const y1 = SH_C1 * (dy * 0.45 + dz * 0.35 - dx * 0.25);
+  const y2 =
+    SH_C2_0 * dx * dy * 0.15 + SH_C2_1 * (3.0 * dz * dz - 1.0) * 0.18;
+
+  // Anisotropic epidermal subsurface & velvet Fresnel response
+  const ndotv = Math.abs(dx * ndx + dy * ndy + dz * ndz);
+  const grazingSubsurface = Math.pow(1 - clamp(ndotv, 0, 1), 1.65);
+
+  const shMod = clamp(0.18 * (y1 + y2) + 0.42 * grazingSubsurface, -0.15, 0.65);
+
+  return [
+    clamp(sh0Rgb[0] + sh1TintRgb[0] * shMod, 0, 1),
+    clamp(sh0Rgb[1] + sh1TintRgb[1] * shMod, 0, 1),
+    clamp(sh0Rgb[2] + sh1TintRgb[2] * shMod, 0, 1),
+  ];
+}
+
+/**
+ * Computes the EWA (Elliptical Weighted Average) projected 2D screen-space covariance matrix
+ * Sigma_2D = J * Sigma_3D * J^T + 0.3 * I for an anisotropic 3D Gaussian ellipsoid.
+ */
+export function compute2DGaussianSplatCovariance(
+  scale3D: [number, number, number],
+  focalX: number,
+  focalY: number,
+  camZ: number,
+  inPlaneAngleRad = 0,
+): GaussianSplat2DCovariance {
+  const safeZ = Math.max(0.15, Math.abs(camZ));
+  const sx = Math.max(0.0002, scale3D[0]);
+  const sy = Math.max(0.0002, scale3D[1]);
+
+  const cosA = Math.cos(inPlaneAngleRad);
+  const sinA = Math.sin(inPlaneAngleRad);
+
+  const varX = sx * sx;
+  const varY = sy * sy;
+
+  // Rotated 2D covariance in camera plane before perspective projection
+  const covXX = cosA * cosA * varX + sinA * sinA * varY;
+  const covXY = cosA * sinA * (varX - varY);
+  const covYY = sinA * sinA * varX + cosA * cosA * varY;
+
+  const jx = focalX / safeZ;
+  const jy = focalY / safeZ;
+
+  // EWA low-pass dilation (+0.3 px^2) guarantees well-conditioned anti-aliased splat projection
+  const a = covXX * jx * jx + 0.3;
+  const b = covXY * jx * jy;
+  const c = covYY * jy * jy + 0.3;
+
+  const det = Math.max(1e-6, a * c - b * b);
+  const mid = 0.5 * (a + c);
+  const disc = Math.sqrt(Math.max(0, (a - c) * (a - c) * 0.25 + b * b));
+  const lambda1 = Math.max(0.1, mid + disc);
+  const lambda2 = Math.max(0.1, mid - disc);
+
+  return {
+    a,
+    b,
+    c,
+    majorAxis: 3.0 * Math.sqrt(lambda1),
+    minorAxis: 3.0 * Math.sqrt(lambda2),
+    det,
+  };
+}
+
+/**
+ * Evaluates the 2D Gaussian splat kernel G(dx, dy) = alpha * exp(-0.5 * x^T * Sigma_2D^-1 * x)
+ * with standard 3DGS 1/255 alpha cutoff culling.
+ */
+export function evaluateGaussianSplatKernel2D(
+  dxPx: number,
+  dyPx: number,
+  cov: GaussianSplat2DCovariance,
+  baseOpacity: number,
+): number {
+  const invDet = 1.0 / Math.max(1e-6, cov.det);
+  const conicX = cov.c * invDet;
+  const conicY = -cov.b * invDet;
+  const conicZ = cov.a * invDet;
+
+  const power =
+    -0.5 *
+    (conicX * dxPx * dxPx + 2.0 * conicY * dxPx * dyPx + conicZ * dyPx * dyPx);
+  if (power > 0.0 || power < -4.5) return 0;
+
+  const alpha = clamp(baseOpacity * Math.exp(power), 0, 0.99);
+  return alpha < 1.0 / 255.0 ? 0 : alpha;
+}
+
+

@@ -17,6 +17,7 @@ import {
   type HandPoseClassification,
   type InteractionLogicMode,
   type MLGestureHint,
+  type GaussianSplatMode,
 } from './gestureMath';
 
 const HAND_CONNECTIONS: Array<[number, number]> = [
@@ -69,6 +70,7 @@ export interface HandTrackerCallbacks {
     deltaRollRad?: number,
     resetAxes?: boolean,
   ) => void;
+  onChangeGaussianSplatMode?: (mode: GaussianSplatMode) => void;
   onEnterXR?: () => void;
 }
 
@@ -116,6 +118,7 @@ export class HandTrackerOverlay {
   private secondHandDetector = new SecondHandGestureDetector(950, 380);
 
   private logicMode: InteractionLogicMode = 'smart-context';
+  private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
   private strongDenoiseEnabled = true;
   private sensitivityPct = 55;
 
@@ -214,6 +217,9 @@ export class HandTrackerOverlay {
         </nav>
 
         <div class="flora-top-actions">
+          <button type="button" id="flora-3dgs-btn" class="flora-action-btn active" title="切换 3D 高斯泼溅 (3D Gaussian Splatting) 辐射场渲染模式">
+            <span>3DGS 实景: 混合</span>
+          </button>
           <button type="button" id="flora-denoise-btn" class="flora-action-btn active" title="切换 1€ 卡尔曼手势平滑滤波与 3D 画面降噪强度">
             <span>降噪滤波: 强</span>
           </button>
@@ -489,6 +495,14 @@ export class HandTrackerOverlay {
           ? '已开启强力降噪：1€ 骨骼防抖滤波 + 纯净低噪点 3D 渲染'
           : '已切换至标准滤波模式',
       );
+    });
+
+    const gsBtn = document.getElementById('flora-3dgs-btn');
+    gsBtn?.addEventListener('click', () => {
+      const order: GaussianSplatMode[] = ['hybrid-3dgs', 'pure-3dgs', 'pbr-mesh'];
+      const nextMode =
+        order[(order.indexOf(this.gaussianSplatMode) + 1) % order.length];
+      this.setGaussianSplatModeUI(nextMode, true);
     });
 
     this.bloomSliderEl.addEventListener('input', () => {
@@ -786,6 +800,35 @@ export class HandTrackerOverlay {
 
   getInteractionLogicMode(): InteractionLogicMode {
     return this.logicMode;
+  }
+
+  setGaussianSplatModeUI(mode: GaussianSplatMode, notify = true): void {
+    this.gaussianSplatMode = mode;
+    const gsBtn = document.getElementById('flora-3dgs-btn');
+    if (gsBtn) {
+      const labelMap: Record<GaussianSplatMode, string> = {
+        'hybrid-3dgs': '3DGS 实景: 混合',
+        'pure-3dgs': '3DGS 实景: 纯泼溅',
+        'pbr-mesh': '3DGS 实景: 仅网格',
+      };
+      gsBtn.textContent = labelMap[mode];
+      gsBtn.classList.toggle('active', mode !== 'pbr-mesh');
+    }
+    if (notify) {
+      this.callbacks.onChangeGaussianSplatMode?.(mode);
+      const toastMap: Record<GaussianSplatMode, string> = {
+        'hybrid-3dgs':
+          '已启用「3DGS 混合实景」：各向异性 3D 高斯泼溅辐射场 + 丝绒次表面植物模型',
+        'pure-3dgs':
+          '已切换至「纯 3D 高斯泼溅辐射场 (Pure 3DGS)」：纯椭球高斯核 + 球谐函数视角光感',
+        'pbr-mesh': '已切换至「丝绒次表面 PBR 网格」对比模式',
+      };
+      this.showGestureToast(toastMap[mode]);
+    }
+  }
+
+  getGaussianSplatMode(): GaussianSplatMode {
+    return this.gaussianSplatMode;
   }
 
   setSensitivity(pct: number, showFeedback = false): void {
