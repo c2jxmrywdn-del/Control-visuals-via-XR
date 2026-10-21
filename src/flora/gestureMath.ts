@@ -1856,18 +1856,18 @@ export function computeFloralShellEnvelope(
 
   const stamenClosedPitchRange: [number, number] = isLily
     ? [0.04, 0.09]
-    : [0.05, 0.14];
+    : [0.05, 0.13];
   const stamenOpenPitchRange: [number, number] = isLily
-    ? [0.34, 0.44]
-    : [0.32, 0.68];
+    ? [0.28, 0.4]
+    : [0.24, 0.48];
 
   // Tight closed-bud pitch range so at b=0 all petals cup closely into an authentic imbricate flower bud
   const petalClosedPitchRange: [number, number] = isSunflower
     ? [0.18, 0.36]
-    : [0.16, 0.38];
+    : [0.15, 0.38];
   const petalOpenPitchRange: [number, number] = isSunflower
-    ? [spec.maxOpenAngleRad * 0.92, spec.maxOpenAngleRad * 1.06]
-    : [0.82, spec.maxOpenAngleRad];
+    ? [spec.maxOpenAngleRad * 0.9, spec.maxOpenAngleRad * 1.05]
+    : [0.54, spec.maxOpenAngleRad];
 
   const sepalRadius = petalMaxRadius + 0.009;
   const sepalY = 0.004;

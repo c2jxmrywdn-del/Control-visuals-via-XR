@@ -56,11 +56,11 @@ export class EnvironmentManager extends THREE.Group {
     super();
     this.name = 'BotanicalEnvironmentManager';
 
-    // 1. UE5 Sky Atmosphere Hemisphere GI Fill (calibrated for rich petal pigment contrast)
+    // 1. UE5 Sky Atmosphere Hemisphere GI Fill (calibrated for rich petal pigment & vein contrast)
     this.hemiLight = new THREE.HemisphereLight(
       this.currentSpec.ambientHex,
       this.currentSpec.groundHex,
-      0.85,
+      0.38,
     );
     this.hemiLight.position.set(0, 3.5, -1.08);
     this.add(this.hemiLight);
@@ -72,7 +72,7 @@ export class EnvironmentManager extends THREE.Group {
     // 2. UE5 Key Sun / Softbox Directional Light with Contact-Hardened Shadow Frustum
     this.keyLight = new THREE.DirectionalLight(
       this.currentSpec.keyLightHex,
-      1.38,
+      0.88,
     );
     this.keyLight.position.set(1.45, 2.75, 0.45);
     this.keyLight.castShadow = !isHeadless;
@@ -93,21 +93,21 @@ export class EnvironmentManager extends THREE.Group {
     this.keyLight.target = this.keyLightTarget;
     this.add(this.keyLight);
 
-    // 3. UE5 Subsurface Back-Rim Light (excites Two-Sided Foliage SSS translucency)
+    // 3. UE5 Subsurface Back-Rim Light (excites Two-Sided Foliage SSS translucency without blowout)
     this.rimLight = new THREE.DirectionalLight(
       this.currentSpec.rimLightHex,
-      1.18,
+      0.62,
     );
     this.rimLight.position.set(-1.55, 2.15, -2.35);
     this.rimLight.target = this.keyLightTarget;
     this.add(this.rimLight);
 
-    // 4. Lateral Specular Fill Light
+    // 4. Lateral Fill Light (gentle shadow lift, preserves deep petal fold contrast)
     this.fillLight = new THREE.PointLight(
       this.currentSpec.fillLightHex,
-      0.82,
+      0.32,
       4.5,
-      1.4,
+      1.5,
     );
     this.fillLight.position.set(-0.92, 1.42, -0.32);
     this.add(this.fillLight);
@@ -115,9 +115,9 @@ export class EnvironmentManager extends THREE.Group {
     // 5. Lumen Ground/Water Bounce Uplight (illuminates abaxial lower petals & sepals)
     this.bounceLight = new THREE.PointLight(
       this.currentSpec.particleHex,
-      0.52,
+      0.24,
       2.2,
-      1.5,
+      1.6,
     );
     this.bounceLight.position.set(0, 0.9, -1.08);
     this.add(this.bounceLight);
@@ -143,7 +143,7 @@ export class EnvironmentManager extends THREE.Group {
       this.particleMaterial.opacity = enabled ? 0.24 : 0.56;
     }
     if (this.godRayMat) {
-      this.godRayMat.opacity = enabled ? 0.055 : 0.095;
+      this.godRayMat.opacity = enabled ? 0.04 : 0.075;
     }
   }
 
@@ -180,7 +180,7 @@ export class EnvironmentManager extends THREE.Group {
           float horizonBand = exp(-abs(dir.y) * 3.2);
           vec3 skyCol = mix(uHorizonColor, uZenithColor, smoothstep(0.12, 0.92, elev));
           float sunSide = max(0.0, dot(dir, normalize(vec3(0.45, 0.35, -0.5))));
-          skyCol += uGlowColor * pow(sunSide, 4.0) * 0.09 + uGlowColor * horizonBand * 0.04;
+          skyCol += uGlowColor * pow(sunSide, 4.0) * 0.06 + uGlowColor * horizonBand * 0.03;
           // Screen-space Interleaved Gradient Noise (IGN) dithering eliminates 8-bit Mach bands
           float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
           skyCol += (ign - 0.5) * (2.2 / 255.0);
@@ -217,7 +217,7 @@ export class EnvironmentManager extends THREE.Group {
       color: this.currentSpec.keyLightHex,
       vertexColors: true,
       transparent: true,
-      opacity: 0.055,
+      opacity: 0.04,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
@@ -248,10 +248,10 @@ export class EnvironmentManager extends THREE.Group {
     const lumenScene = new THREE.Scene();
     lumenScene.background = new THREE.Color(spec.bgHex);
 
-    // Balanced HDR softbox panels for realistic petal & water specular highlights without white blowout
+    // Calibrated HDR softbox panels for natural studio reflections without washing out petal veins
     const keyPanelGeo = new THREE.PlaneGeometry(4.2, 4.2);
     const keyPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.keyLightHex).multiplyScalar(1.85),
+      color: new THREE.Color(spec.keyLightHex).multiplyScalar(0.95),
       side: THREE.DoubleSide,
     });
     const keyPanel = new THREE.Mesh(keyPanelGeo, keyPanelMat);
@@ -260,7 +260,7 @@ export class EnvironmentManager extends THREE.Group {
     lumenScene.add(keyPanel);
 
     const rimPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.rimLightHex).multiplyScalar(1.65),
+      color: new THREE.Color(spec.rimLightHex).multiplyScalar(0.85),
       side: THREE.DoubleSide,
     });
     const rimPanel = new THREE.Mesh(keyPanelGeo, rimPanelMat);
@@ -269,7 +269,7 @@ export class EnvironmentManager extends THREE.Group {
     lumenScene.add(rimPanel);
 
     const fillPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.fillLightHex).multiplyScalar(1.25),
+      color: new THREE.Color(spec.fillLightHex).multiplyScalar(0.65),
       side: THREE.DoubleSide,
     });
     const fillPanel = new THREE.Mesh(keyPanelGeo, fillPanelMat);
@@ -279,7 +279,7 @@ export class EnvironmentManager extends THREE.Group {
 
     const skylightGeo = new THREE.RingGeometry(1.2, 3.6, 32);
     const skylightMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.ambientHex).multiplyScalar(1.4),
+      color: new THREE.Color(spec.ambientHex).multiplyScalar(0.75),
       side: THREE.DoubleSide,
     });
     const skylight = new THREE.Mesh(skylightGeo, skylightMat);
@@ -294,7 +294,7 @@ export class EnvironmentManager extends THREE.Group {
     this.sceneRef.environment = this.envRenderTarget.texture;
     if ('environmentIntensity' in this.sceneRef) {
       (this.sceneRef as THREE.Scene & {environmentIntensity: number}).environmentIntensity =
-        0.92;
+        0.34;
     }
 
     keyPanelGeo.dispose();
@@ -320,26 +320,14 @@ export class EnvironmentManager extends THREE.Group {
       renderer.shadowMap.enabled = !isHeadless;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 0.86;
+      renderer.toneMappingExposure = 0.82;
 
-      if (isHeadless) {
-        // Pace software WebGL (SwiftShader) render calls so Playwright screenshots never starve
-        const origRender = renderer.render.bind(renderer);
-        let lastDrawMs = 0;
-        renderer.render = (s: THREE.Scene, c: THREE.Camera) => {
-          const now = performance.now();
-          if (now - lastDrawMs < 85) return;
-          lastDrawMs = now;
-          origRender(s, c);
-        };
-      } else {
-        this.pmremGenerator = new THREE.PMREMGenerator(renderer);
-        this.pmremGenerator.compileEquirectangularShader();
-        this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
-      }
+      this.pmremGenerator = new THREE.PMREMGenerator(renderer);
+      this.pmremGenerator.compileEquirectangularShader();
+      this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
 
       scene.background = this.currentBgColor;
-      scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.11);
+      scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.095);
     } catch (e) {
       console.warn('Studio PMREM setup fallback:', e);
     }
@@ -544,9 +532,9 @@ export class EnvironmentManager extends THREE.Group {
 
     this.burstIntensity = Math.max(0, this.burstIntensity - safeDt * 1.4);
 
-    this.keyLight.intensity = 1.25 + bloom01 * 0.32 + this.burstIntensity * 0.25;
-    this.rimLight.intensity = 1.05 + bloom01 * 0.35 + this.burstIntensity * 0.25;
-    this.bounceLight.intensity = 0.42 + bloom01 * 0.3;
+    this.keyLight.intensity = 0.82 + bloom01 * 0.16 + this.burstIntensity * 0.12;
+    this.rimLight.intensity = 0.58 + bloom01 * 0.18 + this.burstIntensity * 0.12;
+    this.bounceLight.intensity = 0.22 + bloom01 * 0.12;
 
     for (let i = 0; i < this.godRayMeshes.length; i++) {
       const ray = this.godRayMeshes[i];
