@@ -5,6 +5,7 @@ import {
   ENVIRONMENT_LIBRARY,
   SpringDamper,
   clamp,
+  type HandPoseLabel,
   type HandPoseClassification,
   type InteractionLogicMode,
 } from './gestureMath';
@@ -25,6 +26,7 @@ declare global {
       triggerSwipe: (dir: 'left' | 'right') => void;
       rotateFlower: (yawRad: number, pitchRad: number, rollRad?: number) => void;
       simulatePinchDrag: (dx: number, dy: number, dz?: number) => void;
+      triggerPresetPose: (pose: HandPoseLabel, aperture01?: number) => HandPoseClassification;
       startVideoDemo: () => Promise<void>;
     };
   }
@@ -385,6 +387,8 @@ export class FloraXRScript extends xb.Script {
         handPose: classification?.pose ?? 'pinch-spread',
         handPoseLabelZh: classification?.labelZh ?? '',
         mlCategoryName: classification?.mlCategoryName ?? '',
+        mlConfidence: Number((classification?.confidence ?? 0.95).toFixed(2)),
+        mlProbabilities: classification?.mlProbabilities ?? {},
         fingerExtensions: classification?.fingerExtensions ?? [0, 0, 0, 0, 0],
         isPinchGrabbing: Boolean(classification?.isPinchGrabbing),
         unifiedPlantRotation: true,
@@ -449,6 +453,9 @@ export class FloraXRScript extends xb.Script {
       },
       simulatePinchDrag: (dx: number, dy: number, dz = 0) => {
         this.handOverlay.simulatePinchDragDelta(dx, dy, dz);
+      },
+      triggerPresetPose: (pose: HandPoseLabel, aperture01 = 0.5) => {
+        return this.handOverlay.triggerPresetPose(pose, aperture01);
       },
       startVideoDemo: async () => {
         await this.handOverlay.toggleUploadedVideoDemo();

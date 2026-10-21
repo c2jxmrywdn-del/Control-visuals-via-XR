@@ -6,6 +6,9 @@ import {
   computeCalibrationParams,
   classifyHandPose,
   analyzeFingerKinematics,
+  runNeuralHandInference,
+  buildPresetPoseLandmarks,
+  analyzeVideoFramePixels,
   HandSignalDenoiser,
   SpringDamper,
   SecondHandGestureDetector,
@@ -118,6 +121,62 @@ test('analyzeFingerKinematics handles foreshortened/tilted hands and MediaPipe M
   });
   assert.equal(mlClassified.pose, 'open-palm');
   assert.equal(mlClassified.bloomPercentage, 100);
+});
+
+test('runNeuralHandInference and buildPresetPoseLandmarks produce accurate Softmax probabilities and conflict-free poses', () => {
+  const fistPts = buildPresetPoseLandmarks('closed-fist');
+  const fistClass = classifyHandPose(fistPts);
+  assert.equal(fistClass.pose, 'closed-fist');
+  assert.equal(fistClass.bloomPercentage, 0);
+  assert.ok((fistClass.mlProbabilities?.['closed-fist'] ?? 0) > 0.45);
+
+  const palmPts = buildPresetPoseLandmarks('open-palm');
+  const palmClass = classifyHandPose(palmPts);
+  assert.equal(palmClass.pose, 'open-palm');
+  assert.equal(palmClass.bloomPercentage, 100);
+  assert.ok((palmClass.mlProbabilities?.['open-palm'] ?? 0) > 0.45);
+
+  const okPts = buildPresetPoseLandmarks('pinch-grab');
+  const okClass = classifyHandPose(okPts);
+  assert.equal(okClass.pose, 'pinch-grab');
+  assert.equal(okClass.isPinchGrabbing, true);
+
+  const pointPts = buildPresetPoseLandmarks('pointing');
+  const pointClass = classifyHandPose(pointPts);
+  assert.equal(pointClass.pose, 'pointing');
+  assert.equal(pointClass.extendedFingers, 1);
+
+  const caliperLow = classifyHandPose(
+    buildPresetPoseLandmarks('pinch-caliper', 0.5, 0.5, 0.0),
+  );
+  const caliperHigh = classifyHandPose(
+    buildPresetPoseLandmarks('pinch-caliper', 0.5, 0.5, 1.0),
+  );
+  assert.ok(caliperLow.bloomPercentage <= 10);
+  assert.ok(caliperHigh.bloomPercentage >= 85);
+
+  // Test video frame pixel tensor analyzer
+  const fakeFrame = new Uint8ClampedArray(64 * 48 * 4);
+  for (let y = 12; y < 36; y++) {
+    for (let x = 20; x < 44; x++) {
+      const idx = (y * 64 + x) * 4;
+      fakeFrame[idx] = 215; // R (skin tone)
+      fakeFrame[idx + 1] = 145; // G
+      fakeFrame[idx + 2] = 115; // B
+      fakeFrame[idx + 3] = 255;
+    }
+  }
+  const cv = analyzeVideoFramePixels(fakeFrame, 64, 48);
+  assert.ok(cv.activeRatio > 0.1);
+  assert.ok(cv.centroidX > 0.3 && cv.centroidX < 0.7);
+  assert.ok(cv.spreadAperture01 >= 0 && cv.spreadAperture01 <= 1);
+
+  const neural = runNeuralHandInference(analyzeFingerKinematics(palmPts), {
+    categoryName: 'Open_Palm',
+    score: 0.95,
+  });
+  assert.equal(neural.predictedPose, 'open-palm');
+  assert.equal(neural.featureVector.length, 10);
 });
 
 test('HandSignalDenoiser suppresses high-frequency sensor jitter while tracking real hand movement', () => {
@@ -396,3 +455,4 @@ test('computeFloralShellEnvelope and evaluateOrganPitchAtBloom guarantee strictl
     }
   }
 });
+

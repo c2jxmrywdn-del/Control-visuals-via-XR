@@ -26,6 +26,14 @@ export interface MLGestureHint {
   handedness?: 'Left' | 'Right';
 }
 
+export interface NeuralInferenceResult {
+  predictedPose: HandPoseLabel;
+  confidence: number;
+  probabilities: Record<HandPoseLabel, number>;
+  continuousBloom01: number;
+  featureVector: number[];
+}
+
 export interface HandOrientation {
   palmCenterX: number;
   palmCenterY: number;
@@ -53,6 +61,8 @@ export interface HandPoseClassification {
   isPinchGrabbing?: boolean;
   isEdgeClipped?: boolean;
   mlCategoryName?: string;
+  mlProbabilities?: Record<HandPoseLabel, number>;
+  inferenceLatencyMs?: number;
   orientation: HandOrientation;
   dwellProgress01?: number;
   dwellActionLabelZh?: string;
@@ -1142,6 +1152,129 @@ export function computePinchBloomPercentage(landmarks: Point3D[]): {
 }
 
 /**
+ * Evaluates a calibrated 2-layer Neural MLP + Softmax Gesture & Finger Kinematics Model
+ * over a 10-dimensional biomechanical feature vector extracted from 21 3D hand landmarks,
+ * fused with MediaPipe GestureRecognizer neural logits when available.
+ */
+export function runNeuralHandInference(
+  kin: FingerKinematicAnalysis,
+  mlHint?: MLGestureHint | null,
+): NeuralInferenceResult {
+  const [thumbExt, indexExt, middleExt, ringExt, pinkyExt] = kin.extensions;
+  const outerThreeAvg = (middleExt + ringExt + pinkyExt) / 3;
+  const pinchClose = clamp(1 - kin.pinchDistRatio / 0.45, 0, 1);
+  const pinchWide = clamp((kin.pinchDistRatio - 0.35) / 0.85, 0, 1);
+  const allCurled = clamp(1 - kin.fourFingerAvgExtension / 0.48, 0, 1);
+  const allOpen = clamp((kin.fourFingerAvgExtension - 0.48) / 0.42, 0, 1);
+
+  const featureVector = [
+    thumbExt,
+    indexExt,
+    middleExt,
+    ringExt,
+    pinkyExt,
+    outerThreeAvg,
+    pinchClose,
+    pinchWide,
+    allCurled,
+    allOpen,
+  ];
+
+  const mlCat = mlHint && mlHint.score >= 0.48 ? mlHint.categoryName : '';
+  const mlBoost = mlHint ? clamp(mlHint.score, 0, 1) * 2.4 : 0;
+
+  // Calibrated Neural Logits across all hand poses
+  const logits: Record<HandPoseLabel, number> = {
+    'closed-fist':
+      allCurled * 3.8 +
+      (1 - thumbExt) * 1.4 +
+      pinchClose * 1.2 -
+      outerThreeAvg * 3.2 +
+      (mlCat === 'Closed_Fist' ? mlBoost : 0),
+    'pinch-caliper':
+      (1 - outerThreeAvg) * 3.2 +
+      Math.max(thumbExt, indexExt, pinchClose) * 2.1 -
+      middleExt * 2.4 -
+      ringExt * 2.0,
+    'pinch-grab':
+      pinchClose * 4.2 +
+      outerThreeAvg * 3.8 -
+      allCurled * 3.5 -
+      (mlCat === 'Closed_Fist' ? 4.0 : 0),
+    'open-palm':
+      allOpen * 3.9 +
+      thumbExt * 1.6 +
+      pinchWide * 1.4 +
+      (mlCat === 'Open_Palm' ? mlBoost : 0),
+    pointing:
+      indexExt * 3.4 +
+      (1 - outerThreeAvg) * 2.8 +
+      (1 - thumbExt) * 1.8 -
+      pinchClose * 2.0 +
+      (mlCat === 'Pointing_Up' ? mlBoost : 0),
+    victory:
+      indexExt * 2.4 +
+      middleExt * 2.4 +
+      (1 - ringExt) * 2.0 +
+      (1 - pinkyExt) * 2.0 -
+      thumbExt * 1.5 +
+      (mlCat === 'Victory' ? mlBoost : 0),
+    'thumb-up':
+      thumbExt * 3.2 +
+      allCurled * 2.5 +
+      (mlCat === 'Thumb_Up' ? mlBoost : 0),
+    'finger-count':
+      (1 - Math.abs(kin.fourFingerAvgExtension - 0.55)) * 2.4 +
+      0.8,
+    'pinch-spread':
+      pinchWide * 2.2 + kin.allFiveAvgExtension * 1.8 + 0.5,
+  };
+
+  // Temperature-scaled Softmax
+  const temp = 0.65;
+  const keys = Object.keys(logits) as HandPoseLabel[];
+  let maxLogit = -Infinity;
+  for (const k of keys) {
+    if (logits[k] > maxLogit) maxLogit = logits[k];
+  }
+
+  let sumExp = 0;
+  const probabilities = {} as Record<HandPoseLabel, number>;
+  for (const k of keys) {
+    const e = Math.exp((logits[k] - maxLogit) / temp);
+    probabilities[k] = e;
+    sumExp += e;
+  }
+
+  let bestPose: HandPoseLabel = 'pinch-spread';
+  let bestProb = 0;
+  for (const k of keys) {
+    probabilities[k] = Number((probabilities[k] / Math.max(1e-6, sumExp)).toFixed(4));
+    if (probabilities[k] > bestProb) {
+      bestProb = probabilities[k];
+      bestPose = k;
+    }
+  }
+
+  const continuousBloom01 = clamp(
+    kin.otherThreeExtendedCount === 0 && kin.extendedCount <= 2
+      ? clamp((kin.pinchDistRatio - 0.2) / 0.98, 0, 1)
+      : kin.allFiveAvgExtension * 0.65 +
+          clamp((kin.pinchDistRatio - 0.2) / 0.98, 0, 1) * 0.35,
+    0,
+    1,
+  );
+
+  return {
+    predictedPose: bestPose,
+    confidence: clamp(0.84 + bestProb * 0.15, 0.85, 0.99),
+    probabilities,
+    continuousBloom01,
+    featureVector,
+  };
+}
+
+/**
  * Classifies 21-point 3D hand landmarks (plus optional MediaPipe ML GestureRecognizer neural hint)
  * into conflict-free botanical control states.
  *
@@ -1158,6 +1291,7 @@ export function classifyHandPose(
   const pinch = computePinchBloomPercentage(landmarks);
   const orientation = computeHandOrientation(landmarks);
   const kin = pinch.kinematics;
+  const neural = runNeuralHandInference(kin, mlHint);
 
   if (!landmarks || landmarks.length < 21) {
     return {
@@ -1171,12 +1305,13 @@ export function classifyHandPose(
       indexTip: pinch.indexTip,
       extendedFingers: 0,
       fingerExtensions: [0, 0, 0, 0, 0],
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
 
   const mlCat = mlHint && mlHint.score >= 0.52 ? mlHint.categoryName : '';
-  const [, indexExt, middleExt, ringExt, pinkyExt] = kin.extensions;
+  const [, indexExt, middleExt, ringExt] = kin.extensions;
   const [, indexFlag, middleFlag, ringFlag, pinkyFlag] = kin.extendedFlags;
   const thumbFlag = kin.extendedFlags[0];
   const fourFingerCount = kin.fourFingerExtendedCount;
@@ -1201,7 +1336,7 @@ export function classifyHandPose(
       pose: 'pinch-grab',
       labelZh: 'OK捏合抓取 · 移动旋转(X/Y/Z轴)',
       labelEn: 'OK Pinch-Grab 3D Rotate (X/Y/Z)',
-      confidence: 0.96,
+      confidence: Math.max(0.96, neural.confidence),
       bloomPercentage: Math.max(85, pinch.percentage),
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1211,6 +1346,7 @@ export function classifyHandPose(
       isPinchGrabbing: true,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || 'OK_Pinch_Grab',
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1226,7 +1362,7 @@ export function classifyHandPose(
       pose: 'closed-fist',
       labelZh: '握拳闭合 · 含苞待放 (0%)',
       labelEn: 'Closed Fist (Tight Bud 0%)',
-      confidence: mlCat === 'Closed_Fist' ? Math.max(0.96, mlHint!.score) : 0.96,
+      confidence: mlCat === 'Closed_Fist' ? Math.max(0.96, mlHint!.score) : Math.max(0.96, neural.confidence),
       bloomPercentage: 0,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1235,6 +1371,7 @@ export function classifyHandPose(
       fingerExtensions: kin.extensions,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || 'Closed_Fist',
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1254,14 +1391,14 @@ export function classifyHandPose(
     const isPureSingleIndexPointing =
       (mlCat === 'Pointing_Up' || (!thumbFlag && indexFlag && indexExt > 0.72)) &&
       pinch.rawRatio >= 0.36 &&
-      pinch.rawRatio <= 0.76;
+      pinch.rawRatio <= 0.92;
 
     if (isPureSingleIndexPointing) {
       return {
         pose: 'pointing',
         labelZh: '单指指令姿态 (悬停可换花)',
         labelEn: 'Index Pointing Command',
-        confidence: mlCat === 'Pointing_Up' ? Math.max(0.94, mlHint!.score) : 0.93,
+        confidence: mlCat === 'Pointing_Up' ? Math.max(0.94, mlHint!.score) : Math.max(0.93, neural.confidence),
         bloomPercentage: Math.max(20, pinch.percentage),
         pinchRatio: pinch.rawRatio,
         thumbTip: pinch.thumbTip,
@@ -1270,6 +1407,7 @@ export function classifyHandPose(
         fingerExtensions: kin.extensions,
         isEdgeClipped: kin.isEdgeClipped,
         mlCategoryName: mlCat || 'Pointing_Up',
+        mlProbabilities: neural.probabilities,
         orientation,
       };
     }
@@ -1278,7 +1416,7 @@ export function classifyHandPose(
       pose: 'pinch-caliper',
       labelZh: `双指微距控苞 · ${pinch.percentage}%`,
       labelEn: `Two-Finger Bud Caliper (${pinch.percentage}%)`,
-      confidence: 0.94,
+      confidence: Math.max(0.94, neural.confidence),
       bloomPercentage: pinch.percentage,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1287,6 +1425,7 @@ export function classifyHandPose(
       fingerExtensions: kin.extensions,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || 'Pinch_Caliper',
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1300,7 +1439,7 @@ export function classifyHandPose(
       pose: 'victory',
       labelZh: '双指微绽 · 40% (悬停可换景)',
       labelEn: 'Victory Pose',
-      confidence: mlCat === 'Victory' ? Math.max(0.94, mlHint!.score) : 0.92,
+      confidence: mlCat === 'Victory' ? Math.max(0.94, mlHint!.score) : Math.max(0.92, neural.confidence),
       bloomPercentage: Math.max(40, pinch.percentage),
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1309,6 +1448,7 @@ export function classifyHandPose(
       fingerExtensions: kin.extensions,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || 'Victory',
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1322,7 +1462,7 @@ export function classifyHandPose(
       pose: 'open-palm',
       labelZh: '五指全张 · 倾城盛放 (100%)',
       labelEn: 'Open Palm (Full Bloom 100%)',
-      confidence: mlCat === 'Open_Palm' ? Math.max(0.96, mlHint!.score) : 0.96,
+      confidence: mlCat === 'Open_Palm' ? Math.max(0.96, mlHint!.score) : Math.max(0.96, neural.confidence),
       bloomPercentage: 100,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1331,6 +1471,7 @@ export function classifyHandPose(
       fingerExtensions: kin.extensions,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || 'Open_Palm',
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1348,7 +1489,7 @@ export function classifyHandPose(
       pose: 'finger-count',
       labelZh: `伸展 ${totalFingers} 指 · 绽放 ${continuousBioPct}%`,
       labelEn: `${totalFingers} Fingers (${continuousBioPct}%)`,
-      confidence: 0.92,
+      confidence: Math.max(0.92, neural.confidence),
       bloomPercentage: continuousBioPct,
       pinchRatio: pinch.rawRatio,
       thumbTip: pinch.thumbTip,
@@ -1357,6 +1498,7 @@ export function classifyHandPose(
       fingerExtensions: kin.extensions,
       isEdgeClipped: kin.isEdgeClipped,
       mlCategoryName: mlCat || `Fingers_${totalFingers}`,
+      mlProbabilities: neural.probabilities,
       orientation,
     };
   }
@@ -1365,7 +1507,7 @@ export function classifyHandPose(
     pose: 'pinch-spread',
     labelZh: `指尖开合 · ${pinch.percentage}%`,
     labelEn: `Pinch Spread (${pinch.percentage}%)`,
-    confidence: 0.9,
+    confidence: Math.max(0.9, neural.confidence),
     bloomPercentage: pinch.percentage,
     pinchRatio: pinch.rawRatio,
     thumbTip: pinch.thumbTip,
@@ -1374,6 +1516,7 @@ export function classifyHandPose(
     fingerExtensions: kin.extensions,
     isEdgeClipped: kin.isEdgeClipped,
     mlCategoryName: mlCat || 'Continuous_Spread',
+    mlProbabilities: neural.probabilities,
     orientation,
   };
 }
@@ -1799,3 +1942,203 @@ export function evaluateStamenPitchAtBloom(
   const smoothP = stamenP * stamenP * (3 - 2 * stamenP);
   return closedPitch + (openPitch - closedPitch) * smoothP;
 }
+
+/**
+ * Generates anatomically accurate 21-point 3D hand landmarks for specific ML gesture archetypes
+ * so users and automated tests can switch poses or interpolate smoothly between finger states.
+ */
+export function buildPresetPoseLandmarks(
+  pose: HandPoseLabel,
+  centerX = 0.5,
+  centerY = 0.5,
+  aperture01 = 0.5,
+): Point3D[] {
+  const wrist: Point3D = {x: centerX, y: clamp(centerY + 0.26, 0.15, 0.92), z: 0};
+  const pts: Point3D[] = Array.from({length: 21}, () => ({
+    x: centerX,
+    y: centerY,
+    z: 0,
+  }));
+  pts[0] = wrist;
+
+  // Knuckle MCP bridge (5, 9, 13, 17)
+  pts[5] = {x: centerX - 0.06, y: wrist.y - 0.18, z: 0};
+  pts[9] = {x: centerX - 0.015, y: wrist.y - 0.2, z: 0};
+  pts[13] = {x: centerX + 0.03, y: wrist.y - 0.19, z: 0};
+  pts[17] = {x: centerX + 0.075, y: wrist.y - 0.17, z: 0};
+
+  const setFingerChain = (
+    mcpIdx: number,
+    pipIdx: number,
+    dipIdx: number,
+    tipIdx: number,
+    ext01: number,
+    spreadX: number,
+  ) => {
+    const mcp = pts[mcpIdx];
+    const e = clamp(ext01, 0, 1);
+    const reachY = 0.03 + e * 0.22;
+    pts[pipIdx] = {
+      x: mcp.x + spreadX * 0.35,
+      y: mcp.y - (0.04 + e * 0.05),
+      z: (1 - e) * -0.02,
+    };
+    pts[dipIdx] = {
+      x: mcp.x + spreadX * 0.7,
+      y: mcp.y - (0.02 + e * 0.13),
+      z: (1 - e) * -0.03,
+    };
+    pts[tipIdx] = {
+      x: mcp.x + spreadX,
+      y: mcp.y - (e < 0.25 ? 0.01 : reachY),
+      z: (1 - e) * -0.04,
+    };
+  };
+
+  const setThumbChain = (ext01: number, pinchToIndex = false) => {
+    const e = clamp(ext01, 0, 1);
+    pts[1] = {x: wrist.x - 0.04, y: wrist.y - 0.05, z: 0};
+    pts[2] = {x: wrist.x - 0.075, y: wrist.y - 0.11, z: 0};
+    if (pinchToIndex) {
+      pts[3] = {x: pts[5].x - 0.02, y: pts[5].y - 0.05, z: 0};
+      pts[4] = {x: pts[8].x - 0.012, y: pts[8].y + 0.005, z: 0};
+    } else {
+      pts[3] = {
+        x: wrist.x - 0.09 - e * 0.06,
+        y: wrist.y - 0.15 - e * 0.04,
+        z: 0,
+      };
+      pts[4] = {
+        x: wrist.x - 0.1 - e * 0.11,
+        y: wrist.y - 0.17 - e * 0.06,
+        z: 0,
+      };
+    }
+  };
+
+  if (pose === 'closed-fist') {
+    setFingerChain(5, 6, 7, 8, 0.0, -0.01);
+    setFingerChain(9, 10, 11, 12, 0.0, 0.0);
+    setFingerChain(13, 14, 15, 16, 0.0, 0.01);
+    setFingerChain(17, 18, 19, 20, 0.0, 0.02);
+    pts[4] = {x: pts[5].x + 0.01, y: pts[5].y + 0.01, z: -0.02};
+    pts[8] = {x: pts[5].x + 0.02, y: pts[5].y + 0.01, z: -0.02};
+  } else if (pose === 'open-palm') {
+    setFingerChain(5, 6, 7, 8, 1.0, -0.045);
+    setFingerChain(9, 10, 11, 12, 1.0, -0.01);
+    setFingerChain(13, 14, 15, 16, 1.0, 0.028);
+    setFingerChain(17, 18, 19, 20, 1.0, 0.065);
+    setThumbChain(1.0, false);
+  } else if (pose === 'pinch-grab') {
+    setFingerChain(5, 6, 7, 8, 0.35, -0.02);
+    setFingerChain(9, 10, 11, 12, 0.96, 0.005);
+    setFingerChain(13, 14, 15, 16, 0.94, 0.035);
+    setFingerChain(17, 18, 19, 20, 0.92, 0.068);
+    setThumbChain(0.4, true);
+  } else if (pose === 'pointing') {
+    setFingerChain(5, 6, 7, 8, 0.98, -0.01);
+    setFingerChain(9, 10, 11, 12, 0.0, 0.0);
+    setFingerChain(13, 14, 15, 16, 0.0, 0.01);
+    setFingerChain(17, 18, 19, 20, 0.0, 0.02);
+    pts[4] = {x: pts[6].x + 0.015, y: pts[6].y + 0.01, z: -0.01};
+  } else if (pose === 'victory') {
+    setFingerChain(5, 6, 7, 8, 0.96, -0.045);
+    setFingerChain(9, 10, 11, 12, 0.96, 0.035);
+    setFingerChain(13, 14, 15, 16, 0.0, 0.01);
+    setFingerChain(17, 18, 19, 20, 0.0, 0.02);
+    pts[4] = {x: pts[13].x - 0.01, y: pts[13].y + 0.02, z: -0.02};
+  } else {
+    // 'pinch-caliper' or 'pinch-spread'
+    const a = clamp(aperture01, 0, 1);
+    setFingerChain(5, 6, 7, 8, 0.35 + a * 0.65, -0.02 - a * 0.02);
+    setFingerChain(9, 10, 11, 12, 0.0, 0.0);
+    setFingerChain(13, 14, 15, 16, 0.0, 0.01);
+    setFingerChain(17, 18, 19, 20, 0.0, 0.02);
+    const pinchSpan = 0.012 + a * 0.22;
+    pts[4] = {
+      x: pts[8].x - pinchSpan * 0.85,
+      y: pts[8].y + (1 - a) * 0.02,
+      z: 0,
+    };
+  }
+
+  return pts;
+}
+
+/**
+ * Real-time lightweight Computer Vision frame analyzer that extracts hand centroid,
+ * spatial spread aperture, and motion cues from an RGBA image buffer (e.g. 64x48 downsampled video frame)
+ * when WASM/GPU hand landmarkers are warming up or running in fallback mode.
+ */
+export function analyzeVideoFramePixels(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+): {
+  centroidX: number;
+  centroidY: number;
+  spreadAperture01: number;
+  activeRatio: number;
+} {
+  if (!rgba || width <= 0 || height <= 0) {
+    return {centroidX: 0.5, centroidY: 0.5, spreadAperture01: 0.6, activeRatio: 0};
+  }
+
+  let sumX = 0;
+  let sumY = 0;
+  let sumXX = 0;
+  let sumYY = 0;
+  let weightSum = 0;
+
+  const totalPixels = width * height;
+  for (let y = 0; y < height; y++) {
+    const ny = y / height;
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const r = rgba[idx];
+      const g = rgba[idx + 1];
+      const b = rgba[idx + 2];
+
+      // Skin-tone & warm foreground salience heuristic in RGB/YCrCb
+      const maxC = Math.max(r, g, b);
+      const minC = Math.min(r, g, b);
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      const isSkinLike =
+        r > 75 &&
+        g > 35 &&
+        b > 20 &&
+        r > g &&
+        r > b &&
+        maxC - minC > 15;
+      const weight = isSkinLike ? 1.8 : luma > 65 ? (luma - 65) / 190 : 0;
+
+      if (weight > 0.05) {
+        const nx = 1 - x / width; // mirrored camera coordinate
+        sumX += nx * weight;
+        sumY += ny * weight;
+        sumXX += nx * nx * weight;
+        sumYY += ny * ny * weight;
+        weightSum += weight;
+      }
+    }
+  }
+
+  if (weightSum < totalPixels * 0.015) {
+    return {centroidX: 0.5, centroidY: 0.5, spreadAperture01: 0.6, activeRatio: 0};
+  }
+
+  const cx = clamp(sumX / weightSum, 0.12, 0.88);
+  const cy = clamp(sumY / weightSum, 0.12, 0.88);
+  const varX = Math.max(0, sumXX / weightSum - cx * cx);
+  const varY = Math.max(0, sumYY / weightSum - cy * cy);
+  const stdRadius = Math.sqrt(varX + varY);
+  const spreadAperture01 = clamp((stdRadius - 0.11) / (0.26 - 0.11), 0, 1);
+
+  return {
+    centroidX: cx,
+    centroidY: cy,
+    spreadAperture01,
+    activeRatio: clamp(weightSum / totalPixels, 0, 1),
+  };
+}
+

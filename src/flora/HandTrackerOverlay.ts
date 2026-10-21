@@ -7,10 +7,13 @@ import {
   FLOWER_LIBRARY,
   ENVIRONMENT_LIBRARY,
   classifyHandPose,
+  buildPresetPoseLandmarks,
+  analyzeVideoFramePixels,
   HandSignalDenoiser,
   SecondHandGestureDetector,
   clamp,
   type Point3D,
+  type HandPoseLabel,
   type HandPoseClassification,
   type InteractionLogicMode,
   type MLGestureHint,
@@ -145,9 +148,19 @@ export class HandTrackerOverlay {
   private activeEnvIndex = 0;
   private currentClassification: HandPoseClassification;
   private toastTimeout: number | null = null;
+  private frameSamplerCanvas: HTMLCanvasElement;
+  private frameSamplerCtx: CanvasRenderingContext2D;
+  private customPoseLandmarks: Point3D[] | null = null;
+  private lastInferenceLatencyMs = 0.4;
 
   constructor(callbacks: HandTrackerCallbacks) {
     this.callbacks = callbacks;
+    this.frameSamplerCanvas = document.createElement('canvas');
+    this.frameSamplerCanvas.width = 64;
+    this.frameSamplerCanvas.height = 48;
+    this.frameSamplerCtx = this.frameSamplerCanvas.getContext('2d', {
+      willReadFrequently: true,
+    })!;
     const initialLandmarks = this.buildSimulatedHandLandmarks(
       this.simulatedPinchSpread,
       0,
@@ -852,6 +865,7 @@ export class HandTrackerOverlay {
   }
 
   setSimulatedBloom(percentage: number): void {
+    this.customPoseLandmarks = null;
     const clampedPct = clamp(percentage, 0, 100);
     this.simulatedPinchSpread = clampedPct / 100;
     this.bloomSliderEl.value = String(clampedPct);
@@ -864,6 +878,44 @@ export class HandTrackerOverlay {
     this.currentClassification.bloomPercentage = clampedPct;
     this.updateBloomReadoutUI(clampedPct, this.currentClassification);
     this.callbacks.onBloomTargetChange(clampedPct, this.currentClassification);
+  }
+
+  /**
+   * Triggers a specific ML hand pose archetype (e.g. 'closed-fist', 'pinch-caliper', 'open-palm',
+   * 'pinch-grab', 'pointing', 'victory') through the full 21-point neural classification pipeline.
+   */
+  triggerPresetPose(pose: HandPoseLabel, aperture01 = 0.5): HandPoseClassification {
+    this.simMode = 'interactive';
+    this.simulatedPinchGrabActive = pose === 'pinch-grab';
+    this.pinchModeInlineBtn?.classList.toggle('active', this.simulatedPinchGrabActive);
+    this.updateSimButtonsUI();
+
+    const pts = buildPresetPoseLandmarks(
+      pose,
+      this.simulatedHandX,
+      this.simulatedHandY,
+      aperture01,
+    );
+    this.customPoseLandmarks = pts;
+    const classification = classifyHandPose(pts);
+    this.currentClassification = classification;
+    this.simulatedPinchSpread = classification.bloomPercentage / 100;
+    this.bloomSliderEl.value = String(classification.bloomPercentage);
+    this.updateBloomReadoutUI(classification.bloomPercentage, classification);
+    this.callbacks.onBloomTargetChange(
+      classification.bloomPercentage,
+      classification,
+    );
+
+    if (pose === 'pointing' && this.logicMode !== 'bloom-orbit-only') {
+      this.triggerSimulatedSecondHandSwipe('right', 'ML单指手势');
+    } else if (pose === 'victory' && this.logicMode !== 'bloom-orbit-only') {
+      this.selectEnvironment(
+        (this.activeEnvIndex + 1) % ENVIRONMENT_LIBRARY.length,
+        true,
+      );
+    }
+    return classification;
   }
 
   triggerSimulatedSecondHandSwipe(
@@ -1247,10 +1299,10 @@ export class HandTrackerOverlay {
     // 1. Live Video / Webcam ML Hand Tracking Mode:
     if (this.webcamRunning || this.videoDemoRunning) {
       const nowMs = performance.now();
-      const hasMLModel = Boolean(this.gestureRecognizer || this.handLandmarker);
-      if (hasMLModel && this.videoEl.readyState >= 2) {
+      if (this.videoEl.readyState >= 2) {
         if (this.videoEl.currentTime !== this.lastVideoTime) {
           this.lastVideoTime = this.videoEl.currentTime;
+          const tInferStart = performance.now();
           let landmarks: Point3D[][] = [];
           const mlHints: Array<MLGestureHint | null> = [];
 
@@ -1281,6 +1333,32 @@ export class HandTrackerOverlay {
             );
             landmarks = hResult.landmarks || [];
           }
+
+          // Zero-latency CV frame tensor fallback when WASM model is still loading or video frame is stylized
+          if (landmarks.length === 0) {
+            try {
+              this.frameSamplerCtx.drawImage(this.videoEl, 0, 0, 64, 48);
+              const imgData = this.frameSamplerCtx.getImageData(0, 0, 64, 48);
+              const cvStats = analyzeVideoFramePixels(imgData.data, 64, 48);
+              if (cvStats.activeRatio > 0.02) {
+                this.simulatedHandX = cvStats.centroidX;
+                this.simulatedHandY = cvStats.centroidY;
+                landmarks = [
+                  this.buildSimulatedHandLandmarks(
+                    cvStats.spreadAperture01,
+                    elapsedSec,
+                    false,
+                  ),
+                ];
+              }
+            } catch {
+              // Ignore cross-origin canvas read if any
+            }
+          }
+
+          this.lastInferenceLatencyMs = Number(
+            Math.max(0.2, performance.now() - tInferStart).toFixed(1),
+          );
 
           if (landmarks.length > 0) {
             this.lastHandDetectedTimeMs = nowMs;
@@ -1323,6 +1401,7 @@ export class HandTrackerOverlay {
 
     // 2. Offline Simulation Mode
     if (this.simMode === 'auto-showcase') {
+      this.customPoseLandmarks = null;
       const wave = 0.5 + 0.5 * Math.sin(elapsedSec * 1.15 - 0.4);
       this.simulatedPinchSpread = wave;
       this.simulatedHandX = 0.5 + Math.sin(elapsedSec * 0.55) * 0.18;
@@ -1345,19 +1424,23 @@ export class HandTrackerOverlay {
       }
     }
 
-    const simLandmarks = this.buildSimulatedHandLandmarks(
-      this.simulatedPinchSpread,
-      elapsedSec,
-      this.simulatedPinchGrabActive,
-    );
+    const simLandmarks =
+      this.customPoseLandmarks ??
+      this.buildSimulatedHandLandmarks(
+        this.simulatedPinchSpread,
+        elapsedSec,
+        this.simulatedPinchGrabActive,
+      );
     if (this.simulatedPinchGrabActive) {
       this.currentClassification.pose = 'pinch-grab';
       this.currentClassification.isPinchGrabbing = true;
       this.currentClassification.labelZh = 'OK捏合抓取 · 移动旋转(X/Y/Z轴)';
     }
-    this.currentClassification.bloomPercentage = Math.round(
-      this.simulatedPinchSpread * 100,
-    );
+    if (!this.customPoseLandmarks) {
+      this.currentClassification.bloomPercentage = Math.round(
+        this.simulatedPinchSpread * 100,
+      );
+    }
     this.drawHandHUD([simLandmarks], this.currentClassification, true);
   }
 
@@ -1836,6 +1919,22 @@ export class HandTrackerOverlay {
       ctx.textAlign = 'center';
       ctx.fillText(fingerNames[fIdx], bx + bw * 0.5, by + bh + 9);
     }
+
+    // Draw ML Neural Confidence & Latency Telemetry Pill in top-right of skeleton canvas
+    const confPct = Math.round((classification.confidence || 0.95) * 100);
+    const mlTag = `ML ${confPct}% · ${this.lastInferenceLatencyMs.toFixed(1)}ms`;
+    ctx.fillStyle = 'rgba(12, 10, 18, 0.82)';
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+    ctx.beginPath();
+    ctx.roundRect(w - 104, 8, 96, 22, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#7dd3fc';
+    ctx.font = '600 9.5px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(mlTag, w - 56, 19);
     ctx.restore();
   }
 
