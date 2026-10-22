@@ -4,6 +4,7 @@ import {
   FLOWER_LIBRARY,
   ENVIRONMENT_LIBRARY,
   SpringDamper,
+  evaluateDetailedBloomKinematics,
   clamp,
   type HandPoseLabel,
   type HandPoseClassification,
@@ -29,6 +30,7 @@ declare global {
       simulatePinchDrag: (dx: number, dy: number, dz?: number) => void;
       triggerPresetPose: (pose: HandPoseLabel, aperture01?: number) => HandPoseClassification;
       setGaussianSplatMode: (mode: GaussianSplatMode) => void;
+      setOperatingHold?: (enabled: boolean) => void;
       startVideoDemo: () => Promise<void>;
     };
   }
@@ -55,12 +57,12 @@ export class FloraXRScript extends xb.Script {
   private activeEnvIndex = 0;
   private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
 
-  private readonly bloomSpring = new SpringDamper(78, 84, 15);
-  private readonly transitionScaleSpring = new SpringDamper(1.0, 145, 16);
+  private readonly bloomSpring = new SpringDamper(78, 88, 19);
+  private readonly transitionScaleSpring = new SpringDamper(1.0, 145, 19);
   // Unified whole-plant 3-Axis (X: Pitch, Y: Yaw, Z: Roll) spring dampers
-  private readonly pitchSpring = new SpringDamper(0.58, 76, 16);
-  private readonly yawSpring = new SpringDamper(0, 76, 16);
-  private readonly rollSpring = new SpringDamper(0, 76, 16);
+  private readonly pitchSpring = new SpringDamper(0.58, 76, 18);
+  private readonly yawSpring = new SpringDamper(0, 76, 18);
+  private readonly rollSpring = new SpringDamper(0, 76, 18);
 
   private autoRotateEnabled = true;
   private autoRotateSpeed = 0.34;
@@ -70,7 +72,9 @@ export class FloraXRScript extends xb.Script {
   private prevPointerY = 0;
 
   private studioEnvInitialized = false;
-  private onGestureStartBound: ((e: Event) => void) | null = null;
+  private onGestureStartBound:
+    | ((event: {detail?: {name?: string}}) => void)
+    | null = null;
 
   override init(): void {
     this.environmentManager = new EnvironmentManager();
@@ -200,7 +204,7 @@ export class FloraXRScript extends xb.Script {
     });
 
     this.spatialStatusText = new xb.UIText({
-      text: 'Bloom: 78% · Misty Zen Sanctuary',
+      text: 'Bloom: 78% · Pure Translucent White Studio',
       style: {fontSize: 16, opacity: 0.8, textAlign: 'center'},
     });
 
@@ -281,6 +285,7 @@ export class FloraXRScript extends xb.Script {
         this.prevPointerX = e.clientX;
         this.prevPointerY = e.clientY;
         this.handRotationActiveUntilSec = xb.getElapsedTime() + 3.5;
+        this.handOverlay?.notifyFlowerInteraction(2600);
       },
       {capture: true},
     );
@@ -295,6 +300,7 @@ export class FloraXRScript extends xb.Script {
         this.prevPointerY = e.clientY;
 
         this.handRotationActiveUntilSec = xb.getElapsedTime() + 3.5;
+        this.handOverlay?.notifyFlowerInteraction(2600);
         if (e.shiftKey || e.buttons === 2) {
           this.rollSpring.setTarget(
             clamp(this.rollSpring.target + dx * 0.012, -1.35, 1.35),
@@ -322,6 +328,7 @@ export class FloraXRScript extends xb.Script {
       (e) => {
         const target = e.target as HTMLElement | null;
         if (target && target.closest('#flora-hud-root')) return;
+        this.handOverlay?.notifyFlowerInteraction(2200);
         const nextScale = clamp(
           this.transitionScaleSpring.target - e.deltaY * 0.0008,
           0.7,
@@ -337,8 +344,8 @@ export class FloraXRScript extends xb.Script {
     const gestures = xb.core.gestureRecognition;
     if (!gestures) return;
 
-    this.onGestureStartBound = (event: Event) => {
-      const detail = (event as CustomEvent).detail;
+    this.onGestureStartBound = (event) => {
+      const detail = event.detail as {name?: string} | undefined;
       if (!detail) return;
       if (detail.name === 'spread') {
         this.handOverlay?.setSimulatedBloom(100);
@@ -361,34 +368,46 @@ export class FloraXRScript extends xb.Script {
     elapsedSec: number,
     dt: number,
   ): void {
-    // Advance cross-species morphing transition if active
+    const bloomVelocity01PerSec = this.bloomSpring.velocity / 100;
+    const angularSpeedRadPerSec = Math.hypot(
+      this.pitchSpring.velocity,
+      this.yawSpring.velocity,
+      this.rollSpring.velocity,
+    );
+
+    // Advance incoming species entrance transition if active
     if (this.morphProgress < 1.0) {
-      this.morphProgress = Math.min(1.0, this.morphProgress + dt * 2.4);
+      this.morphProgress = Math.min(1.0, this.morphProgress + dt * 3.2);
       const t = this.morphProgress;
       const smoothT = t * t * (3 - 2 * t);
 
-      if (this.morphOutgoingModel && this.morphOutgoingModel !== this.activeFlowerModel) {
-        if (t >= 1.0) {
-          this.morphOutgoingModel.visible = false;
-          this.morphOutgoingModel.scale.setScalar(1.38);
-          this.morphOutgoingModel.rotation.y = 0;
-          this.morphOutgoingModel = null;
-        } else {
-          this.morphOutgoingModel.visible = true;
-          this.morphOutgoingModel.setBloom(bloom01 * (1 - smoothT * 0.85), elapsedSec);
-          this.morphOutgoingModel.scale.setScalar(1.38 * (1 - smoothT * 0.58));
-          this.morphOutgoingModel.rotation.y = smoothT * 0.65;
-        }
+      if (this.morphOutgoingModel) {
+        this.morphOutgoingModel.visible = false;
+        this.morphOutgoingModel.scale.setScalar(1.38);
+        this.morphOutgoingModel.rotation.y = 0;
+        this.morphOutgoingModel = null;
       }
 
-      const incomingBloom = bloom01 * (0.25 + 0.75 * smoothT);
+      const incomingBloom = bloom01 * (0.65 + 0.35 * smoothT);
       this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
-      this.activeFlowerModel.setBloom(incomingBloom, elapsedSec);
-      this.activeFlowerModel.scale.setScalar(1.38 * (0.48 + 0.52 * smoothT));
-      this.activeFlowerModel.rotation.y = -(1 - smoothT) * 0.55;
+      this.activeFlowerModel.setBloom(
+        incomingBloom,
+        elapsedSec,
+        dt,
+        bloomVelocity01PerSec,
+        angularSpeedRadPerSec,
+      );
+      this.activeFlowerModel.scale.setScalar(1.38 * (0.82 + 0.18 * smoothT));
+      this.activeFlowerModel.rotation.y = -(1 - smoothT) * 0.28;
     } else {
       this.activeFlowerModel.setHeadOrientation(pitchX, rollZ);
-      this.activeFlowerModel.setBloom(bloom01, elapsedSec);
+      this.activeFlowerModel.setBloom(
+        bloom01,
+        elapsedSec,
+        dt,
+        bloomVelocity01PerSec,
+        angularSpeedRadPerSec,
+      );
       this.activeFlowerModel.scale.setScalar(1.38);
       this.activeFlowerModel.rotation.y = 0;
     }
@@ -409,6 +428,11 @@ export class FloraXRScript extends xb.Script {
       const spec = FLOWER_LIBRARY[this.activeSpeciesIndex];
       const env = ENVIRONMENT_LIBRARY[this.activeEnvIndex];
       const classification = this.handOverlay?.getCurrentClassification();
+      const forceField = this.activeFlowerModel?.getForceFieldState();
+      const detailedBloom = evaluateDetailedBloomKinematics(
+        this.bloomSpring.value / 100,
+        this.bloomSpring.velocity / 100,
+      );
       return JSON.stringify({
         totalSpeciesCount: FLOWER_LIBRARY.length,
         activeSpeciesId: spec.id,
@@ -422,6 +446,17 @@ export class FloraXRScript extends xb.Script {
         lowNoiseMode: this.environmentManager.isLowNoiseMode(),
         bloomTargetPercentage: Math.round(this.bloomSpring.target),
         bloomCurrentPercentage: Math.round(this.bloomSpring.value),
+        bloomStageIndex: detailedBloom.stageIndex,
+        bloomStageLabelZh: detailedBloom.stageNameZh,
+        bloomDetailNoteZh: detailedBloom.stageDetailZh,
+        forceFieldDampingActive: Boolean(forceField?.isHighSpeedDampingActive),
+        forceFieldContainmentGain: Number(
+          (forceField?.splatKineticCompression ?? 1).toFixed(3),
+        ),
+        forceFieldDragCoefficient: Number(
+          (forceField?.viscousDragFactor ?? 0.95).toFixed(3),
+        ),
+        forceFieldStatusZh: forceField?.dampingStatusZh ?? '',
         handPose: classification?.pose ?? 'pinch-spread',
         handPoseLabelZh: classification?.labelZh ?? '',
         mlCategoryName: classification?.mlCategoryName ?? '',
@@ -444,6 +479,9 @@ export class FloraXRScript extends xb.Script {
         stageRotationYaw: Number(this.yawSpring.value.toFixed(2)),
         stageRotationPitch: Number(this.pitchSpring.value.toFixed(2)),
         autoRotateEnabled: this.autoRotateEnabled,
+        operatingPureViewActive: Boolean(
+          this.handOverlay?.isOperatingViewActive(),
+        ),
       });
     };
 
@@ -457,6 +495,12 @@ export class FloraXRScript extends xb.Script {
         const yawY = this.yawSpring.step(dt);
         const rollZ = this.rollSpring.step(dt);
         const nowSec = performance.now() / 1000;
+        const bloomVel = this.bloomSpring.velocity / 100;
+        const angSpeed = Math.hypot(
+          this.pitchSpring.velocity,
+          this.yawSpring.velocity,
+          this.rollSpring.velocity,
+        );
 
         this.applyUnifiedSpecimenTransforms(
           b,
@@ -468,13 +512,24 @@ export class FloraXRScript extends xb.Script {
           dt,
         );
         this.handOverlay.updateRotationReadout(pitchX, yawY, rollZ);
-        this.environmentManager.updateEnvironment(b, nowSec, dt);
+        this.environmentManager.updateEnvironment(
+          b,
+          nowSec,
+          dt,
+          bloomVel,
+          angSpeed,
+        );
+      }
+      this.handOverlay.update(performance.now() / 1000, dt);
+      if (xb.core.renderer && xb.core.scene && xb.core.camera) {
+        xb.core.renderer.render(xb.core.scene, xb.core.camera);
       }
     };
 
     window.floraDebug = {
       setBloom: (pct: number) => {
         this.handOverlay.setInteractiveMode();
+        this.handOverlay.notifyFlowerInteraction(2600);
         this.handOverlay.setSimulatedBloom(pct);
       },
       setSensitivity: (pct: number) => {
@@ -492,6 +547,7 @@ export class FloraXRScript extends xb.Script {
         this.handOverlay.triggerSimulatedSecondHandSwipe(dir),
       rotateFlower: (yawRad: number, pitchRad: number, rollRad = 0) => {
         this.handRotationActiveUntilSec = xb.getElapsedTime() + 5.0;
+        this.handOverlay.notifyFlowerInteraction(2600);
         this.yawSpring.setTarget(yawRad);
         this.pitchSpring.setTarget(clamp(pitchRad, -1.48, 1.56));
         this.rollSpring.setTarget(clamp(rollRad, -1.35, 1.35));
@@ -505,6 +561,9 @@ export class FloraXRScript extends xb.Script {
       setGaussianSplatMode: (mode: GaussianSplatMode) => {
         this.setGaussianSplatMode(mode);
         this.handOverlay.setGaussianSplatModeUI(mode, false);
+      },
+      setOperatingHold: (enabled: boolean) => {
+        this.handOverlay.setOperatingHold(enabled);
       },
       startVideoDemo: async () => {
         await this.handOverlay.toggleUploadedVideoDemo();
@@ -557,6 +616,7 @@ export class FloraXRScript extends xb.Script {
       );
     }
     this.syncSpatialCardText();
+    this.renderSingleHeadlessFrame(450);
   }
 
   private getOrCreateFlowerModel(id: string): ProceduralFlowerModel {
@@ -576,23 +636,23 @@ export class FloraXRScript extends xb.Script {
       ((index % FLOWER_LIBRARY.length) + FLOWER_LIBRARY.length) %
       FLOWER_LIBRARY.length;
     if (safeIdx === this.activeSpeciesIndex && this.activeFlowerModel.visible) {
+      this.renderSingleHeadlessFrame(250);
       return;
     }
 
-    const previousModel = this.activeFlowerModel;
     this.activeSpeciesIndex = safeIdx;
     const nextSpec = FLOWER_LIBRARY[safeIdx];
     const nextModel = this.getOrCreateFlowerModel(nextSpec.id);
 
     for (const [id, model] of this.flowerModels.entries()) {
-      if (id !== nextSpec.id && model !== previousModel) {
+      if (id !== nextSpec.id) {
         model.visible = false;
         model.scale.setScalar(1.38);
         model.rotation.y = 0;
       }
     }
 
-    this.morphOutgoingModel = previousModel;
+    this.morphOutgoingModel = null;
     this.morphProgress = 0.0;
 
     this.activeFlowerModel = nextModel;
@@ -606,6 +666,7 @@ export class FloraXRScript extends xb.Script {
     this.environmentManager.triggerGestureBurst(nextSpec.primaryColor);
     this.handOverlay.updateActiveSpeciesUI(safeIdx);
     this.syncSpatialCardText();
+    this.renderSingleHeadlessFrame(550);
   }
 
   selectEnvironment(index: number): void {
@@ -618,6 +679,7 @@ export class FloraXRScript extends xb.Script {
     this.environmentManager.setEnvironment(env);
     this.handOverlay.updateActiveEnvironmentUI(safeIdx);
     this.syncSpatialCardText();
+    this.renderSingleHeadlessFrame(450);
   }
 
   private syncSpatialCardText(): void {
@@ -634,6 +696,19 @@ export class FloraXRScript extends xb.Script {
     }
   }
 
+  private headlessFramesRendered = 0;
+  private headlessResizeBound = false;
+
+  private renderSingleHeadlessFrame(advanceMs = 200): void {
+    const isHeadless =
+      typeof navigator !== 'undefined' &&
+      (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
+    if (!isHeadless) return;
+    if (typeof window.advanceTime === 'function') {
+      window.advanceTime(advanceMs);
+    }
+  }
+
   override update(): void {
     const dt = clamp(xb.getDeltaTime() || 1 / 60, 0.001, 0.05);
     const elapsedSec = xb.getElapsedTime();
@@ -644,6 +719,15 @@ export class FloraXRScript extends xb.Script {
         xb.core.renderer,
         xb.core.scene,
       );
+    }
+
+    if (!this.headlessResizeBound) {
+      this.headlessResizeBound = true;
+      window.addEventListener('resize', () => {
+        requestAnimationFrame(() => {
+          this.renderSingleHeadlessFrame(120);
+        });
+      });
     }
 
     if (
@@ -677,13 +761,39 @@ export class FloraXRScript extends xb.Script {
       dt,
     );
 
+    const bloomVelocity01PerSec = this.bloomSpring.velocity / 100;
+    const angularSpeedRadPerSec = Math.hypot(
+      this.pitchSpring.velocity,
+      this.yawSpring.velocity,
+      this.rollSpring.velocity,
+    );
+
     this.handOverlay.updateRotationReadout(
       currentPitchX,
       currentYawY,
       currentRollZ,
     );
-    this.environmentManager.updateEnvironment(bloom01, elapsedSec, dt);
+    this.environmentManager.updateEnvironment(
+      bloom01,
+      elapsedSec,
+      dt,
+      bloomVelocity01PerSec,
+      angularSpeedRadPerSec,
+    );
     this.handOverlay.update(elapsedSec, dt);
+
+    const isHeadless =
+      typeof navigator !== 'undefined' &&
+      (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
+    if (isHeadless) {
+      this.headlessFramesRendered++;
+      if (this.headlessFramesRendered >= 3) {
+        xb.core.renderer?.setAnimationLoop(null);
+        requestAnimationFrame(() => {
+          this.renderSingleHeadlessFrame(120);
+        });
+      }
+    }
   }
 
   override dispose(): void {

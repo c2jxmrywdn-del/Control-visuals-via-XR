@@ -3,10 +3,15 @@ import {
   FLOWER_LIBRARY,
   type FlowerSpec,
   type GaussianSplatMode,
+  type BloomForceFieldState,
+  type ForceFieldParticleState,
   clamp,
   computeFloralShellEnvelope,
   evaluateOrganPitchAtBloom,
   evaluateStamenPitchAtBloom,
+  computeBloomForceFieldDamping,
+  stepForceFieldDampedParticle,
+  evaluateDetailedBloomKinematics,
 } from './gestureMath';
 
 interface PetalPivotData {
@@ -28,6 +33,7 @@ interface StamenPivotData {
   openPitch: number;
   baseRoll: number;
   phaseOffset: number;
+  normalizedRank?: number;
 }
 
 interface LeafPivotData {
@@ -38,11 +44,20 @@ interface LeafPivotData {
   phaseOffset: number;
 }
 
+interface DewdropItemData {
+  mesh: THREE.Mesh;
+  targetGeometry: THREE.BufferGeometry;
+  uNorm: number;
+  baseVNorm: number;
+  dropRadius: number;
+}
+
 interface PollenMoteData {
   mesh: THREE.Mesh;
+  state: ForceFieldParticleState;
   baseRadius: number;
-  baseAngle: number;
   baseY: number;
+  baseScale: number;
   speed: number;
   phase: number;
 }
@@ -50,6 +65,8 @@ interface PollenMoteData {
 interface AnimatedShaderUniforms {
   uTime: {value: number};
   uBloom: {value: number};
+  uTipUncurl: {value: number};
+  uKineticContainment: {value: number};
 }
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // ~2.3999632 rad (137.508 deg)
@@ -125,6 +142,26 @@ function sampleSpeciesPetalPigment(
         (v - 0.74) / 0.26,
       );
     }
+  } else if (spec.morphology === 'orchid-zygomorphic') {
+    if (v < 0.24) {
+      out.lerpColors(
+        new THREE.Color('#d946ef'),
+        new THREE.Color('#f3e8ff'),
+        v / 0.24,
+      );
+    } else if (v < 0.72) {
+      out.lerpColors(
+        new THREE.Color('#f3e8ff'),
+        new THREE.Color('#c084fc'),
+        (v - 0.24) / 0.48,
+      );
+    } else {
+      out.lerpColors(
+        new THREE.Color('#c084fc'),
+        new THREE.Color('#9333ea'),
+        (v - 0.72) / 0.28,
+      );
+    }
   } else if (spec.morphology === 'lily-recurved') {
     if (v < 0.18) {
       out.lerpColors(
@@ -141,6 +178,86 @@ function sampleSpeciesPetalPigment(
     }
     if (absU > 0.68) {
       out.lerp(new THREE.Color('#fae3eb'), (absU - 0.68) / 0.32);
+    }
+  } else if (spec.morphology === 'sunflower-capitulum') {
+    if (v < 0.22) {
+      out.lerpColors(
+        new THREE.Color('#b45309'),
+        new THREE.Color('#f59e0b'),
+        v / 0.22,
+      );
+    } else if (v < 0.75) {
+      out.lerpColors(
+        new THREE.Color('#f59e0b'),
+        new THREE.Color('#fbbf24'),
+        (v - 0.22) / 0.53,
+      );
+    } else {
+      out.lerpColors(
+        new THREE.Color('#fbbf24'),
+        new THREE.Color('#fde047'),
+        (v - 0.75) / 0.25,
+      );
+    }
+  } else if (spec.morphology === 'iris-bearded') {
+    if (v < 0.28) {
+      out.lerpColors(
+        new THREE.Color('#fef08a'),
+        new THREE.Color('#818cf8'),
+        v / 0.28,
+      );
+    } else if (v < 0.72) {
+      out.lerpColors(
+        new THREE.Color('#818cf8'),
+        new THREE.Color('#4361ee'),
+        (v - 0.28) / 0.44,
+      );
+    } else {
+      out.lerpColors(
+        new THREE.Color('#4361ee'),
+        new THREE.Color('#1e1b4b'),
+        (v - 0.72) / 0.28,
+      );
+    }
+  } else if (spec.morphology === 'camellia-fibonacci') {
+    if (v < 0.3) {
+      out.lerpColors(
+        new THREE.Color('#be3455'),
+        new THREE.Color('#ec7a95'),
+        v / 0.3,
+      );
+    } else if (v < 0.76) {
+      out.lerpColors(
+        new THREE.Color('#ec7a95'),
+        new THREE.Color('#f6b8c8'),
+        (v - 0.3) / 0.46,
+      );
+    } else {
+      out.lerpColors(
+        new THREE.Color('#f6b8c8'),
+        new THREE.Color('#fce8ee'),
+        (v - 0.76) / 0.24,
+      );
+    }
+  } else if (spec.morphology === 'waterlily-stellate') {
+    if (v < 0.22) {
+      out.lerpColors(
+        new THREE.Color('#f59e0b'),
+        new THREE.Color('#7dd3fc'),
+        v / 0.22,
+      );
+    } else if (v < 0.68) {
+      out.lerpColors(
+        new THREE.Color('#7dd3fc'),
+        new THREE.Color('#0284c7'),
+        (v - 0.22) / 0.46,
+      );
+    } else {
+      out.lerpColors(
+        new THREE.Color('#0284c7'),
+        new THREE.Color('#1e3a8a'),
+        (v - 0.68) / 0.32,
+      );
     }
   } else {
     if (v < 0.38) {
@@ -161,9 +278,9 @@ function sampleSpeciesPetalPigment(
   return {
     sh0: [clamp(out.r, 0, 1), clamp(out.g, 0, 1), clamp(out.b, 0, 1)],
     sh1: [
-      clamp(sh1Color.r * 0.38, 0, 1),
-      clamp(sh1Color.g * 0.38, 0, 1),
-      clamp(sh1Color.b * 0.38, 0, 1),
+      clamp(sh1Color.r * 0.34, 0, 1),
+      clamp(sh1Color.g * 0.34, 0, 1),
+      clamp(sh1Color.b * 0.34, 0, 1),
     ],
   };
 }
@@ -194,19 +311,23 @@ function applyUE5FoliageSubsurfaceShader(
   const sharedUniforms: AnimatedShaderUniforms = {
     uTime: {value: 0},
     uBloom: {value: 0.78},
+    uTipUncurl: {value: 0.56},
+    uKineticContainment: {value: 1.0},
   };
   if (uniformRegistry) {
     uniformRegistry.push(sharedUniforms);
   }
 
   material.customProgramCacheKey = () =>
-    `ue5_3dgs_velvet_sss_v14_${subsurfaceColorHex}_${sssStrength.toFixed(2)}_${windAmplitude.toFixed(4)}`;
+    `ue5_3dgs_velvet_sss_v16_${subsurfaceColorHex}_${sssStrength.toFixed(2)}_${windAmplitude.toFixed(4)}`;
 
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uSubsurfaceColor = {value: sssColor};
     shader.uniforms.uSubsurfaceStrength = {value: sssStrength};
     shader.uniforms.uTime = sharedUniforms.uTime;
     shader.uniforms.uBloom = sharedUniforms.uBloom;
+    shader.uniforms.uTipUncurl = sharedUniforms.uTipUncurl;
+    shader.uniforms.uKineticContainment = sharedUniforms.uKineticContainment;
     shader.uniforms.uWindAmp = {value: windAmplitude};
 
     shader.vertexShader = shader.vertexShader.replace(
@@ -214,21 +335,32 @@ function applyUE5FoliageSubsurfaceShader(
       `#include <common>
       uniform float uTime;
       uniform float uBloom;
+      uniform float uTipUncurl;
+      uniform float uKineticContainment;
       uniform float uWindAmp;`,
     );
 
-    // Living GPU vertex undulation: flexes petal blade & ruffled margins while keeping base (color.b == 0) locked
+    // Living GPU vertex undulation + Multi-stage petal tip uncurling & marginal ruffle awakening:
+    // Flexes petal blade & ruffled margins while keeping base (color.b == 0) 100% locked in receptacle socket!
     shader.vertexShader = shader.vertexShader.replace(
       '#include <begin_vertex>',
       `#include <begin_vertex>
       #if defined( USE_COLOR )
         float vTipDist = clamp( color.b, 0.0, 1.0 );
-        float flexWeight = vTipDist * vTipDist * ( 0.38 + 0.62 * uBloom );
+        float flexWeight = vTipDist * vTipDist * ( 0.38 + 0.62 * uBloom ) * uKineticContainment;
         float worldPhase = position.x * 22.0 + position.y * 14.0 + position.z * 18.0;
         float primaryWave = sin( uTime * 2.25 + worldPhase + vTipDist * 4.2 );
         float secondaryRipple = cos( uTime * 3.6 - position.x * 32.0 + vTipDist * 6.8 ) * 0.48;
         float marginWeight = clamp( abs( position.x ) * 11.0, 0.3, 1.0 );
-        transformed.z += ( primaryWave + secondaryRipple ) * uWindAmp * flexWeight * marginWeight;
+
+        // Progressive tip uncurl as bloom increases:
+        // At b=0 (closed bud), tips stay naturally cupped; as b->1 (full bloom), tips gently unroll outward (-z)
+        float tipZone = smoothstep( 0.48, 1.0, vTipDist );
+        float uncurlArchZ = -tipZone * tipZone * uTipUncurl * 0.014;
+        // Progressive marginal ruffle awakening as petals spread open
+        float marginalAwakeningZ = sin( position.x * 42.0 + vTipDist * 5.5 ) * ( 0.0024 * uBloom ) * marginWeight * tipZone;
+
+        transformed.z += ( primaryWave + secondaryRipple ) * uWindAmp * flexWeight * marginWeight + uncurlArchZ + marginalAwakeningZ;
         transformed.x += sin( uTime * 1.85 + worldPhase * 0.75 ) * ( uWindAmp * 0.36 ) * flexWeight;
       #endif`,
     );
@@ -450,7 +582,7 @@ function getBotanicalRoughnessTexture(): THREE.CanvasTexture {
  */
 function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
   const size = IS_HEADLESS ? 256 : 1024;
-  const key = `ue5_albedo_${size}_v14_${spec.id}`;
+  const key = `ue5_albedo_${size}_v15_${spec.id}`;
   if (textureCache.has(key)) return textureCache.get(key)!;
 
   const scale = size / 1024;
@@ -465,7 +597,6 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
     const vSize = 1024;
     const grad = ctx.createLinearGradient(0, vSize, 0, 0);
     if (spec.morphology === 'lotus-pod') {
-      // Authentic Sacred Pink Lotus: Warm golden-jade base -> soft blush-rose belly -> deep carmine-rose tip (rich contrast, never bleached white!)
       grad.addColorStop(0.0, '#c8a654');
       grad.addColorStop(0.14, '#f2cad8');
       grad.addColorStop(0.44, '#ee9ab9');
@@ -484,17 +615,40 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
       grad.addColorStop(0.56, '#d12358');
       grad.addColorStop(0.82, '#ee6b92');
       grad.addColorStop(1.0, '#f8bfd0');
+    } else if (spec.morphology === 'orchid-zygomorphic') {
+      // Royal Phalaenopsis: warm rose-gold claw -> luminous pearl-lavender -> rich amethyst-orchid margin
+      grad.addColorStop(0.0, '#be185d');
+      grad.addColorStop(0.18, '#f5d0fe');
+      grad.addColorStop(0.52, '#e9d5ff');
+      grad.addColorStop(0.82, '#c084fc');
+      grad.addColorStop(1.0, '#9333ea');
     } else if (spec.morphology === 'sunflower-capitulum') {
       grad.addColorStop(0.0, '#9a3412');
-      grad.addColorStop(0.22, '#c2410c');
-      grad.addColorStop(0.54, '#d97706');
-      grad.addColorStop(0.85, '#eab308');
-      grad.addColorStop(1.0, '#facc15');
+      grad.addColorStop(0.18, '#d97706');
+      grad.addColorStop(0.52, '#f59e0b');
+      grad.addColorStop(0.84, '#fbbf24');
+      grad.addColorStop(1.0, '#fde047');
+    } else if (spec.morphology === 'iris-bearded') {
+      // Sapphire Bearded Iris: luminous white-gold signal throat -> vivid cobalt-sapphire -> deep royal indigo tip
+      grad.addColorStop(0.0, '#fef08a');
+      grad.addColorStop(0.18, '#e0e7ff');
+      grad.addColorStop(0.46, '#6366f1');
+      grad.addColorStop(0.78, '#3b82f6');
+      grad.addColorStop(0.92, '#2563eb');
+      grad.addColorStop(1.0, '#1e1b4b');
     } else if (spec.morphology === 'camellia-fibonacci') {
       grad.addColorStop(0.0, '#9e2a47');
       grad.addColorStop(0.36, '#d45d79');
       grad.addColorStop(0.74, '#ea9ab0');
       grad.addColorStop(1.0, '#f7d1dc');
+    } else if (spec.morphology === 'waterlily-stellate') {
+      // Celestial Blue Star Waterlily: glowing golden-amber nectar base -> sky-aqua -> cerulean -> deep cobalt-indigo tip
+      grad.addColorStop(0.0, '#f59e0b');
+      grad.addColorStop(0.14, '#fef08a');
+      grad.addColorStop(0.32, '#bae6fd');
+      grad.addColorStop(0.64, '#0284c7');
+      grad.addColorStop(0.88, '#1d4ed8');
+      grad.addColorStop(1.0, '#172554');
     } else {
       const darkThroat = new THREE.Color(spec.throatColor).multiplyScalar(0.78);
       const midPrimary = new THREE.Color(spec.primaryColor).multiplyScalar(0.86);
@@ -502,13 +656,13 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
       grad.addColorStop(0.0, `#${darkThroat.getHexString()}`);
       grad.addColorStop(0.38, `#${midPrimary.getHexString()}`);
       grad.addColorStop(0.82, `#${tipSecondary.getHexString()}`);
-      grad.addColorStop(1.0, `#${ midPrimary.getHexString() }`);
+      grad.addColorStop(1.0, `#${midPrimary.getHexString()}`);
     }
 
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, vSize, vSize);
 
-    // Rich botanical tip & upper-margin blush (enhances 3D petal rim definition!)
+    // Species-matched tip & upper-margin blush (NEVER puts red on blue/yellow species!)
     const tipRimGrad = ctx.createRadialGradient(512, 30, 20, 512, 160, 480);
     tipRimGrad.addColorStop(
       0,
@@ -516,29 +670,51 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
         ? 'rgba(156, 14, 68, 0.42)'
         : spec.morphology === 'peony-ruffled'
           ? 'rgba(128, 12, 48, 0.28)'
-          : 'rgba(140, 20, 65, 0.24)',
+          : spec.morphology === 'iris-bearded'
+            ? 'rgba(30, 27, 75, 0.38)'
+            : spec.morphology === 'waterlily-stellate'
+              ? 'rgba(23, 37, 84, 0.42)'
+              : spec.morphology === 'sunflower-capitulum'
+                ? 'rgba(234, 88, 12, 0.22)'
+                : spec.morphology === 'orchid-zygomorphic'
+                  ? 'rgba(126, 34, 206, 0.32)'
+                  : 'rgba(140, 20, 65, 0.22)',
     );
     tipRimGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
     ctx.fillStyle = tipRimGrad;
     ctx.fillRect(0, 0, vSize, vSize);
 
-    // Central midrib structural shading
+    // Species-matched central midrib structural shading
+    const midribColor =
+      spec.morphology === 'iris-bearded'
+        ? 'rgba(30, 27, 75, 0.16)'
+        : spec.morphology === 'waterlily-stellate'
+          ? 'rgba(12, 74, 110, 0.16)'
+          : spec.morphology === 'sunflower-capitulum'
+            ? 'rgba(180, 83, 9, 0.18)'
+            : spec.morphology === 'orchid-zygomorphic'
+              ? 'rgba(107, 33, 168, 0.14)'
+              : 'rgba(120, 18, 54, 0.12)';
     const midribShade = ctx.createLinearGradient(452, 0, 572, 0);
     midribShade.addColorStop(0, 'rgba(0,0,0,0)');
-    midribShade.addColorStop(0.35, 'rgba(120, 18, 54, 0.12)');
-    midribShade.addColorStop(0.5, 'rgba(255, 240, 245, 0.18)');
-    midribShade.addColorStop(0.65, 'rgba(120, 18, 54, 0.12)');
+    midribShade.addColorStop(0.35, midribColor);
+    midribShade.addColorStop(0.5, 'rgba(255, 250, 245, 0.18)');
+    midribShade.addColorStop(0.65, midribColor);
     midribShade.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = midribShade;
     ctx.fillRect(452, 0, 120, vSize);
 
-    // Deep nectar claw shading at the petal base for crisp whorl separation
+    // Species-matched basal claw shading for crisp whorl depth
     const clawShade = ctx.createRadialGradient(512, 1010, 15, 512, 920, 340);
     clawShade.addColorStop(
       0,
-      spec.morphology === 'lotus-pod'
-        ? 'rgba(168, 125, 32, 0.42)'
-        : 'rgba(92, 10, 34, 0.38)',
+      spec.morphology === 'lotus-pod' || spec.morphology === 'waterlily-stellate'
+        ? 'rgba(180, 130, 24, 0.42)'
+        : spec.morphology === 'iris-bearded'
+          ? 'rgba(217, 119, 6, 0.36)'
+          : spec.morphology === 'sunflower-capitulum'
+            ? 'rgba(146, 64, 14, 0.45)'
+            : 'rgba(92, 10, 34, 0.36)',
     );
     clawShade.addColorStop(1, 'rgba(0, 0, 0, 0)');
     ctx.fillStyle = clawShade;
@@ -579,26 +755,68 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
         ctx.arc(sx, sy, sr, 0, Math.PI * 2);
         ctx.fill();
       }
+    } else if (spec.morphology === 'orchid-zygomorphic') {
+      // Authentic Phalaenopsis basal nectar guide speckles (蝴蝶兰基部豹纹斑点)
+      for (let s = 0; s < 38; s++) {
+        const uSpot = 0.24 + ((s * 41) % 52) / 100;
+        const vSpot = 0.62 + ((s * 29) % 34) / 100;
+        const sx = uSpot * vSize;
+        const sy = vSpot * vSize;
+        const sr = 2.8 + (s % 3) * 1.6;
+        ctx.fillStyle = 'rgba(131, 24, 67, 0.58)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (spec.morphology === 'iris-bearded') {
+      // White-and-gold signal patch & deep indigo nectar guide striations at the claw/haft
+      const signalPatch = ctx.createRadialGradient(512, 820, 18, 512, 780, 260);
+      signalPatch.addColorStop(0, 'rgba(254, 249, 195, 0.88)');
+      signalPatch.addColorStop(0.55, 'rgba(224, 231, 255, 0.52)');
+      signalPatch.addColorStop(1, 'rgba(99, 102, 241, 0)');
+      ctx.fillStyle = signalPatch;
+      ctx.fillRect(180, 480, 664, 544);
+    } else if (spec.morphology === 'sunflower-capitulum') {
+      // Prominent longitudinal parallel ray-floret ribs (向日葵舌状花纵向主肋脉)
+      for (const ribU of [-0.28, -0.14, 0, 0.14, 0.28]) {
+        const rx = 512 + ribU * 760;
+        const ribGrad = ctx.createLinearGradient(rx - 18, 0, rx + 18, 0);
+        ribGrad.addColorStop(0, 'rgba(180, 83, 9, 0)');
+        ribGrad.addColorStop(0.5, 'rgba(180, 83, 9, 0.28)');
+        ribGrad.addColorStop(1, 'rgba(180, 83, 9, 0)');
+        ctx.fillStyle = ribGrad;
+        ctx.fillRect(rx - 18, 20, 36, 980);
+      }
     }
 
-    // High-definition primary + secondary anastomosing vascular venation (清晰细腻的植物花瓣脉络)
+    // High-definition species-matched primary + secondary anastomosing vascular venation
     const primaryVeinColor =
       spec.morphology === 'waterlily-stellate'
-        ? 'rgba(32, 185, 160, 0.42)'
-        : spec.morphology === 'lotus-pod'
-          ? 'rgba(162, 16, 72, 0.42)'
-          : spec.morphology === 'peony-ruffled'
-            ? 'rgba(108, 8, 38, 0.38)'
-            : spec.morphology === 'sunflower-capitulum'
-              ? 'rgba(146, 52, 12, 0.40)'
-              : 'rgba(132, 18, 58, 0.36)';
+        ? 'rgba(14, 116, 144, 0.44)'
+        : spec.morphology === 'iris-bearded'
+          ? 'rgba(30, 27, 75, 0.46)'
+          : spec.morphology === 'orchid-zygomorphic'
+            ? 'rgba(126, 34, 206, 0.36)'
+            : spec.morphology === 'lotus-pod'
+              ? 'rgba(162, 16, 72, 0.42)'
+              : spec.morphology === 'peony-ruffled'
+                ? 'rgba(108, 8, 38, 0.38)'
+                : spec.morphology === 'sunflower-capitulum'
+                  ? 'rgba(180, 83, 9, 0.42)'
+                  : 'rgba(156, 32, 68, 0.32)';
 
     const fineVeinColor =
       spec.morphology === 'waterlily-stellate'
-        ? 'rgba(72, 228, 198, 0.28)'
-        : spec.morphology === 'lotus-pod'
-          ? 'rgba(192, 28, 88, 0.26)'
-          : 'rgba(148, 24, 66, 0.24)';
+        ? 'rgba(56, 189, 248, 0.30)'
+        : spec.morphology === 'iris-bearded'
+          ? 'rgba(67, 56, 202, 0.32)'
+          : spec.morphology === 'orchid-zygomorphic'
+            ? 'rgba(168, 85, 247, 0.26)'
+            : spec.morphology === 'sunflower-capitulum'
+              ? 'rgba(217, 119, 6, 0.28)'
+              : spec.morphology === 'lotus-pod'
+                ? 'rgba(192, 28, 88, 0.26)'
+                : 'rgba(148, 24, 66, 0.22)';
 
     for (let i = 0; i < 68; i++) {
       const u = i / 67;
@@ -645,6 +863,62 @@ function getSpeciesPetalTexture(spec: FlowerSpec): THREE.CanvasTexture {
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.anisotropy = 8;
+  tex.needsUpdate = true;
+  textureCache.set(key, tex);
+  return tex;
+}
+
+/**
+ * Dedicated botanical texture for the Orchid's trilobed Labellum (蝴蝶兰三裂唇瓣纹理):
+ * Golden-amber nectar throat with crimson tiger stripes & deep magenta-ruby velvet apex.
+ */
+function getOrchidLipTexture(): THREE.CanvasTexture {
+  const size = IS_HEADLESS ? 256 : 512;
+  const key = `ue5_orchid_lip_${size}_v15`;
+  if (textureCache.has(key)) return textureCache.get(key)!;
+
+  const scale = size / 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.save();
+    ctx.scale(scale, scale);
+    const grad = ctx.createLinearGradient(0, 512, 0, 0);
+    grad.addColorStop(0.0, '#fbbf24');
+    grad.addColorStop(0.28, '#fef08a');
+    grad.addColorStop(0.52, '#db2777');
+    grad.addColorStop(0.82, '#be185d');
+    grad.addColorStop(1.0, '#831843');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Crimson tiger-stripe nectar guides on the golden lip throat
+    for (let i = 0; i < 24; i++) {
+      const u = i / 23;
+      const sx = 256 + (u - 0.5) * 90;
+      const ex = 256 + (u - 0.5) * 440;
+      ctx.beginPath();
+      ctx.moveTo(sx, 505);
+      ctx.quadraticCurveTo(256 + (u - 0.5) * 260, 340, ex, 120);
+      ctx.strokeStyle = 'rgba(131, 24, 67, 0.55)';
+      ctx.lineWidth = i % 2 === 0 ? 3.2 : 1.8;
+      ctx.stroke();
+    }
+
+    for (let s = 0; s < 42; s++) {
+      const sx = 120 + ((s * 43) % 272);
+      const sy = 280 + ((s * 31) % 210);
+      ctx.fillStyle = 'rgba(112, 26, 117, 0.72)';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 3.5 + (s % 3) * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
   textureCache.set(key, tex);
   return tex;
@@ -707,9 +981,9 @@ function createSculptedPetalGeometry(
   const pos = geometry.attributes.position;
   const colors = new Float32Array(pos.count * 3);
 
-  const safeCup = clamp(cupDepth, 0.06, 0.32);
+  const safeCup = clamp(cupDepth, 0.06, 0.34);
   const safeRuffle = clamp(ruffleAmp, 0, 0.014);
-  const safeRecurve = clamp(recurvedFactor, -0.14, 0.32);
+  const safeRecurve = clamp(recurvedFactor, -0.45, 0.36);
   const asymPhase = asymmetrySeed * 1.37;
   const lateralSweep = Math.sin(asymmetrySeed * 2.1) * width * 0.036;
 
@@ -908,7 +1182,9 @@ export class ProceduralFlowerModel extends THREE.Group {
   private readonly companionBudPivots: PetalPivotData[] = [];
   private readonly stamenPivots: StamenPivotData[] = [];
   private readonly leafPivots: LeafPivotData[] = [];
+  private readonly dewdropItems: DewdropItemData[] = [];
   private readonly pollenMotes: PollenMoteData[] = [];
+  private readonly antherMaterials: THREE.MeshPhysicalMaterial[] = [];
   private readonly animatedShaderUniforms: AnimatedShaderUniforms[] = [];
   private readonly meshMaterialsForMode: THREE.MeshPhysicalMaterial[] = [];
   private readonly materialsToDispose: THREE.Material[] = [];
@@ -920,6 +1196,8 @@ export class ProceduralFlowerModel extends THREE.Group {
   private totalGaussianSplats = 0;
   private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
   private currentBloom01 = 0.78;
+  private lastForceFieldState: BloomForceFieldState =
+    computeBloomForceFieldDamping(0.78, 0, 0, 0);
   private userHeadPitchRad = 0.58;
   private userHeadRollRad = 0;
 
@@ -969,19 +1247,19 @@ export class ProceduralFlowerModel extends THREE.Group {
       }
     } else if (mode === 'pure-3dgs') {
       this.gaussianSplatCloudMesh.visible = true;
-      this.gaussianSplatMaterial.uniforms.uSplatScaleMultiplier.value = 1.42;
-      this.gaussianSplatMaterial.uniforms.uSplatOpacityMultiplier.value = 1.28;
+      this.gaussianSplatMaterial.uniforms.uSplatScaleMultiplier.value = 0.92;
+      this.gaussianSplatMaterial.uniforms.uSplatOpacityMultiplier.value = 1.18;
       this.gaussianSplatMaterial.uniforms.uPureSplatMode.value = 1.0;
       for (const mat of this.meshMaterialsForMode) {
         mat.transparent = true;
-        mat.opacity = 0.25;
+        mat.opacity = 0.32;
         mat.depthWrite = true;
       }
     } else {
-      // 'hybrid-3dgs' (Default): Continuous 3DGS SH + Subsurface Velvet Petals + Soft 3DGS Rim/Pollen Radiance Field
+      // 'hybrid-3dgs' (Default): Tightly Contained Anisotropic 3DGS Surface Radiance + Subsurface Velvet Petals (Zero Overflow!)
       this.gaussianSplatCloudMesh.visible = true;
-      this.gaussianSplatMaterial.uniforms.uSplatScaleMultiplier.value = 1.08;
-      this.gaussianSplatMaterial.uniforms.uSplatOpacityMultiplier.value = 0.26;
+      this.gaussianSplatMaterial.uniforms.uSplatScaleMultiplier.value = 0.68;
+      this.gaussianSplatMaterial.uniforms.uSplatOpacityMultiplier.value = 0.18;
       this.gaussianSplatMaterial.uniforms.uPureSplatMode.value = 0.0;
       for (const mat of this.meshMaterialsForMode) {
         mat.transparent = false;
@@ -1091,7 +1369,13 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.add(neckBallMesh);
     this.geometriesToDispose.push(neckBallGeo);
 
-    const outerRimR = Math.min(0.088, envelope.sepalRadius + 0.005);
+    const isMonocot =
+      this.spec.morphology === 'iris-bearded' ||
+      this.spec.morphology === 'lily-recurved' ||
+      this.spec.morphology === 'orchid-zygomorphic';
+    const outerRimR = isMonocot
+      ? 0.032
+      : Math.min(0.088, envelope.sepalRadius + 0.005);
     const recepPoints = [
       new THREE.Vector2(0.015, -0.008),
       new THREE.Vector2(0.022, 0.0),
@@ -1195,10 +1479,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     const nodalRingGeo = new THREE.TorusGeometry(0.0145, 0.0034, 12, 24);
     nodalRingGeo.rotateX(Math.PI / 2);
 
+    // Note: nodeGroup.rotation.y = -cfg.yaw - Math.PI / 2 makes -Z the OUTWARD radial direction from the stem!
     const petioleCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, 0.002, 0.011),
-      new THREE.Vector3(0, 0.0, 0.028),
-      new THREE.Vector3(0, -0.005, 0.045),
+      new THREE.Vector3(0, 0.002, -0.011),
+      new THREE.Vector3(0, 0.005, -0.027),
+      new THREE.Vector3(0, 0.006, -0.042),
     ]);
     const petioleGeo = new THREE.TubeGeometry(
       petioleCurve,
@@ -1209,9 +1494,9 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
 
     const midribCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, 0, -0.001),
-      new THREE.Vector3(0, 0.08, -0.005),
-      new THREE.Vector3(0, 0.155, -0.012),
+      new THREE.Vector3(0, 0, 0.001),
+      new THREE.Vector3(0, 0.08, 0.005),
+      new THREE.Vector3(0, 0.155, 0.012),
     ]);
     const midribGeo = new THREE.TubeGeometry(midribCurve, 14, 0.0022, 8, false);
 
@@ -1226,10 +1511,10 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
 
     const leafNodeConfigs = [
-      {tStem: 0.72, yaw: 0.65, pitch: -1.22, roll: 0.08, scale: 0.94},
-      {tStem: 0.54, yaw: -2.1, pitch: -1.28, roll: -0.09, scale: 1.06},
-      {tStem: 0.34, yaw: 2.3, pitch: -1.25, roll: 0.07, scale: 0.96},
-      {tStem: 0.18, yaw: -0.85, pitch: -1.32, roll: -0.06, scale: 0.86},
+      {tStem: 0.72, yaw: 0.45, pitch: -1.02, roll: 0.06, scale: 0.92},
+      {tStem: 0.54, yaw: -2.25, pitch: -1.08, roll: -0.07, scale: 1.04},
+      {tStem: 0.34, yaw: 2.15, pitch: -1.06, roll: 0.05, scale: 0.96},
+      {tStem: 0.18, yaw: -0.95, pitch: -1.12, roll: -0.05, scale: 0.86},
     ];
 
     leafNodeConfigs.forEach((cfg, idx) => {
@@ -1248,19 +1533,19 @@ export class ProceduralFlowerModel extends THREE.Group {
       nodeGroup.add(petiole);
 
       const axilBud = new THREE.Mesh(axilBudGeo, leafMat);
-      axilBud.position.set(0, 0.004, 0.016);
-      axilBud.rotation.x = 0.42;
+      axilBud.position.set(0, 0.005, -0.015);
+      axilBud.rotation.x = -0.38;
       nodeGroup.add(axilBud);
 
       for (const side of [-1, 1]) {
         const stip = new THREE.Mesh(stipuleGeo, leafMat);
-        stip.position.set(side * 0.008, 0.001, 0.015);
-        stip.rotation.set(-0.55, side * 0.45, side * -0.35);
+        stip.position.set(side * 0.008, 0.002, -0.014);
+        stip.rotation.set(-0.48, side * -0.42, side * 0.32);
         nodeGroup.add(stip);
       }
 
       const bladePivot = new THREE.Group();
-      bladePivot.position.set(0, -0.005, 0.044);
+      bladePivot.position.set(0, 0.006, -0.041);
       bladePivot.scale.setScalar(cfg.scale);
 
       const leaf = new THREE.Mesh(leafGeo, leafMat);
@@ -1351,26 +1636,13 @@ export class ProceduralFlowerModel extends THREE.Group {
       );
       sPiv.rotation.y = -sYaw - Math.PI / 2;
       const sMesh = new THREE.Mesh(stipuleGeo, leafMat);
-      sMesh.scale.setScalar(1.85);
-      sMesh.rotation.x = -0.28;
+      sMesh.scale.setScalar(1.45);
+      sMesh.rotation.x = -0.36;
       sPiv.add(sMesh);
       this.companionBudGroup.add(sPiv);
     }
 
-    const budPetalGeo = createSculptedPetalGeometry(
-      0.092,
-      0.056,
-      0.24,
-      2.2,
-      0.0035,
-      0,
-      0.58,
-      0.24,
-      0.06,
-      0.78,
-      0,
-      0.7,
-    );
+    // Nascent Companion Flower Bud (5 non-intersecting cupped petals that never cross the center axis)
     const budPetalMat = new THREE.MeshPhysicalMaterial({
       map: getSpeciesPetalTexture(this.spec),
       vertexColors: true,
@@ -1390,28 +1662,47 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.spec.secondaryColor,
       0.46,
       this.animatedShaderUniforms,
-      0.006,
+      0.005,
+    );
+
+    const budPetalGeo = createSculptedPetalGeometry(
+      0.078,
+      0.042,
+      0.20,
+      1.6,
+      0.002,
+      0,
+      0.56,
+      0.22,
+      0.10,
+      0.62,
+      0,
+      0.4,
     );
     this.geometriesToDispose.push(budPetalGeo);
     this.materialsToDispose.push(budPetalMat);
     this.meshMaterialsForMode.push(budPetalMat);
 
-    for (let i = 0; i < 9; i++) {
-      const rank = i / 8;
-      const yaw = i * GOLDEN_ANGLE;
-      const r = 0.008 + rank * 0.008;
+    // 2 Inner + 3 Outer non-intersecting cupped bud petals (outward pitch 0.24..0.76 rad)
+    for (let i = 0; i < 5; i++) {
+      const isInner = i < 2;
+      const rank = isInner ? 0.25 : 0.85;
+      const yaw = isInner
+        ? i * Math.PI + 0.35
+        : ((i - 2) / 3) * Math.PI * 2;
+      const r = isInner ? 0.012 : 0.022;
       const p = new THREE.Group();
       p.position.set(
         Math.cos(yaw) * r,
-        0.02 - rank * 0.004,
+        isInner ? 0.021 : 0.017,
         Math.sin(yaw) * r,
       );
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 3.1) * 0.06;
+      const baseRoll = organicNoise(i * 3.1) * 0.03;
       p.rotation.y = baseYaw;
       const m = new THREE.Mesh(budPetalGeo, budPetalMat);
-      const closedPitch = 0.08 + rank * 0.18;
-      const openPitch = 0.34 + rank * 0.56;
+      const closedPitch = isInner ? 0.24 : 0.42;
+      const openPitch = isInner ? 0.44 : 0.76;
       m.rotation.x = -closedPitch;
       m.rotation.z = baseRoll;
       m.castShadow = true;
@@ -1425,9 +1716,9 @@ export class ProceduralFlowerModel extends THREE.Group {
         openPitch,
         baseYaw,
         baseRoll,
-        naturalScaleX: 0.94 + organicNoise(i * 5.7) * 0.06,
-        naturalScaleY: 0.96 + organicNoise(i * 7.3) * 0.05,
-        phaseOffset: i * 0.55,
+        naturalScaleX: isInner ? 0.88 : 1.0,
+        naturalScaleY: isInner ? 0.92 : 1.0,
+        phaseOffset: i * 0.65,
       });
     }
     this.add(this.companionBudGroup);
@@ -1511,45 +1802,49 @@ export class ProceduralFlowerModel extends THREE.Group {
         this.flowerHeadGroup.add(socket, sMesh, tMesh);
       }
     } else if (morph === 'sunflower-capitulum') {
-      const discGeo = new THREE.CylinderGeometry(
-        envelope.coreMaxRadius,
-        envelope.coreMaxRadius * 0.82,
-        0.036,
-        48,
-      );
+      // Sculpted convex paraboloid capitulum receptacle dome (no bare flat brown gaps)
+      const discProfile = [
+        new THREE.Vector2(0.0, 0.056),
+        new THREE.Vector2(envelope.coreMaxRadius * 0.45, 0.052),
+        new THREE.Vector2(envelope.coreMaxRadius * 0.82, 0.043),
+        new THREE.Vector2(envelope.coreMaxRadius * 1.02, 0.032),
+        new THREE.Vector2(envelope.coreMaxRadius * 0.92, 0.014),
+        new THREE.Vector2(0.015, 0.008),
+      ];
+      const discGeo = new THREE.LatheGeometry(discProfile, 48);
       const discMat = new THREE.MeshStandardMaterial({
-        color: '#281305',
+        color: '#3b1c08',
         roughness: 0.78,
       });
       const discMesh = new THREE.Mesh(discGeo, discMat);
-      discMesh.position.y = 0.022;
       discMesh.receiveShadow = true;
       this.flowerHeadGroup.add(discMesh);
       this.geometriesToDispose.push(discGeo);
       this.materialsToDispose.push(discMat);
 
-      const outerFloretCount = 135;
-      const innerBudCount = 135;
+      const outerFloretCount = 220;
+      const innerBudCount = 200;
       const totalFlorets = outerFloretCount + innerBudCount;
 
       const openFloretGeo = new THREE.CylinderGeometry(
-        0.0045,
+        0.0046,
         0.0022,
-        0.015,
-        6,
+        0.016,
+        7,
       );
       const openFloretMat = new THREE.MeshPhysicalMaterial({
         color: '#d97706',
-        roughness: 0.52,
-        sheen: 0.6,
+        roughness: 0.48,
+        sheen: 0.65,
         sheenColor: new THREE.Color('#fde047'),
       });
-      const budFloretGeo = new THREE.SphereGeometry(0.0044, 8, 8);
-      budFloretGeo.scale(1, 1.4, 1);
+      const budFloretGeo = new THREE.SphereGeometry(0.0045, 8, 8);
+      budFloretGeo.scale(1, 1.38, 1);
       const budFloretMat = new THREE.MeshPhysicalMaterial({
-        color: '#4a2208',
-        roughness: 0.55,
-        sheen: 0.4,
+        color: '#5c2808',
+        roughness: 0.52,
+        sheen: 0.45,
+        sheenColor: new THREE.Color('#d97706'),
       });
 
       const openInst = new THREE.InstancedMesh(
@@ -1567,18 +1862,18 @@ export class ProceduralFlowerModel extends THREE.Group {
       let budIdx = 0;
 
       for (let i = 0; i < totalFlorets; i++) {
-        const norm = i / totalFlorets;
-        const r = Math.sqrt(norm) * (envelope.coreMaxRadius - 0.005);
+        const norm = (i + 0.5) / totalFlorets;
+        const r = Math.sqrt(norm) * (envelope.coreMaxRadius - 0.002);
         const theta = i * GOLDEN_ANGLE;
         const domeY =
-          0.04 + (1 - Math.pow(r / envelope.coreMaxRadius, 2)) * 0.022;
+          0.032 + (1 - Math.pow(r / envelope.coreMaxRadius, 1.85)) * 0.025;
         dummy.position.set(Math.cos(theta) * r, domeY, Math.sin(theta) * r);
         dummy.rotation.set(
-          Math.sin(theta) * norm * 0.28,
-          0,
-          -Math.cos(theta) * norm * 0.28,
+          Math.sin(theta) * norm * 0.34,
+          -theta,
+          -Math.cos(theta) * norm * 0.34,
         );
-        dummy.scale.setScalar(0.82 + norm * 0.32);
+        dummy.scale.setScalar(0.86 + norm * 0.34);
         dummy.updateMatrix();
         if (i < innerBudCount) {
           budInst.setMatrixAt(budIdx++, dummy.matrix);
@@ -1593,36 +1888,153 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.materialsToDispose.push(openFloretMat, budFloretMat);
       return;
     } else if (morph === 'orchid-zygomorphic') {
-      const colGeo = new THREE.CapsuleGeometry(0.013, 0.032, 10, 20);
+      // Sculpted arcuate Gynostemium (合蕊柱) + Rostellum + Golden Pollinia Anther Cap
+      const colCurve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0, 0.018, -0.004),
+        new THREE.Vector3(0, 0.038, 0.006),
+        new THREE.Vector3(0, 0.056, 0.022),
+      ]);
+      const colGeo = new THREE.TubeGeometry(colCurve, 18, 0.0115, 16, false);
       const colMat = new THREE.MeshPhysicalMaterial({
-        color: '#f8dce8',
-        roughness: 0.48,
+        color: '#fae8ff',
+        roughness: 0.44,
         sheen: 0.78,
         sheenColor: new THREE.Color('#ffffff'),
       });
       const colMesh = new THREE.Mesh(colGeo, colMat);
-      colMesh.position.set(0, 0.046, 0.008);
-      colMesh.rotation.x = 0.42;
 
-      const antherCapGeo = new THREE.SphereGeometry(0.0105, 14, 14);
-      antherCapGeo.scale(1.05, 0.85, 1.15);
+      const antherCapGeo = new THREE.SphereGeometry(0.011, 16, 16);
+      antherCapGeo.scale(1.05, 0.85, 1.2);
       const antherCapMat = new THREE.MeshPhysicalMaterial({
-        color: '#e09f3e',
-        roughness: 0.42,
-        sheen: 0.65,
+        color: '#f59e0b',
+        roughness: 0.38,
+        sheen: 0.68,
+        sheenColor: new THREE.Color('#fef08a'),
       });
       const capMesh = new THREE.Mesh(antherCapGeo, antherCapMat);
-      capMesh.position.set(0, 0.06, 0.016);
+      capMesh.position.set(0, 0.057, 0.025);
 
       this.flowerHeadGroup.add(colMesh, capMesh);
       this.geometriesToDispose.push(colGeo, antherCapGeo);
       this.materialsToDispose.push(colMat, antherCapMat);
       return;
+    } else if (morph === 'iris-bearded') {
+      // Iris germanica: central trigonal ovary/nectary column + 3 sub-style stamens tucked beneath the 3 style arms
+      const styleColGeo = new THREE.CylinderGeometry(0.0052, 0.0085, 0.036, 12);
+      styleColGeo.translate(0, 0.022, 0);
+      const styleColMat = new THREE.MeshPhysicalMaterial({
+        color: '#e0e7ff',
+        roughness: 0.46,
+        sheen: 0.72,
+        sheenColor: new THREE.Color('#fef08a'),
+      });
+      const styleColMesh = new THREE.Mesh(styleColGeo, styleColMat);
+      this.flowerHeadGroup.add(styleColMesh);
+
+      const irisFilCurve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0.032, 0.006),
+        new THREE.Vector3(0, 0.062, 0.022),
+      ]);
+      const irisFilGeo = new THREE.TubeGeometry(irisFilCurve, 12, 0.0018, 8, false);
+      const irisAntherGeo = createBilobedAntherGeometry(0.0028, 0.014, false, 0.062, 0.022);
+      const irisStamenMat = new THREE.MeshPhysicalMaterial({
+        color: '#fef08a',
+        roughness: 0.48,
+        sheen: 0.75,
+        sheenColor: new THREE.Color('#ffffff'),
+      });
+      this.geometriesToDispose.push(styleColGeo, irisFilGeo, irisAntherGeo);
+      this.materialsToDispose.push(styleColMat, irisStamenMat);
+
+      for (let i = 0; i < 3; i++) {
+        const yaw = (i / 3) * Math.PI * 2;
+        const pivot = new THREE.Group();
+        pivot.position.set(Math.cos(yaw) * 0.022, 0.024, Math.sin(yaw) * 0.022);
+        pivot.rotation.y = -yaw - Math.PI / 2;
+        const fMesh = new THREE.Mesh(irisFilGeo, irisStamenMat);
+        const aMesh = new THREE.Mesh(irisAntherGeo, irisStamenMat);
+        pivot.add(fMesh, aMesh);
+        this.flowerHeadGroup.add(pivot);
+        this.stamenPivots.push({
+          pivot,
+          closedPitch: 0.18,
+          openPitch: 0.82,
+          baseRoll: 0,
+          phaseOffset: i * 0.8,
+        });
+      }
+      return;
+    } else if (morph === 'waterlily-stellate') {
+      // Nymphaea caerulea: Golden Solar Stigmatic Disc (柱头盘) + 52 golden-amber stamens with sky-blue tips
+      const solarCupProfile = [
+        new THREE.Vector2(0.0, 0.028),
+        new THREE.Vector2(0.018, 0.032),
+        new THREE.Vector2(0.024, 0.042),
+        new THREE.Vector2(0.019, 0.046),
+        new THREE.Vector2(0.005, 0.036),
+        new THREE.Vector2(0.0, 0.038),
+      ];
+      const solarCupGeo = new THREE.LatheGeometry(solarCupProfile, 32);
+      const solarCupMat = new THREE.MeshPhysicalMaterial({
+        color: '#f59e0b',
+        roughness: 0.44,
+        sheen: 0.82,
+        sheenColor: new THREE.Color('#fef08a'),
+      });
+      const solarCupMesh = new THREE.Mesh(solarCupGeo, solarCupMat);
+      this.flowerHeadGroup.add(solarCupMesh);
+
+      const wlFilCurve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0.028, -0.002),
+        new THREE.Vector3(0, 0.056, 0.005),
+      ]);
+      const wlFilGeo = new THREE.TubeGeometry(wlFilCurve, 12, 0.0021, 8, false);
+      const wlAntherGeo = createBilobedAntherGeometry(0.0025, 0.0095, false, 0.056, 0.005);
+      const wlFilMat = new THREE.MeshPhysicalMaterial({
+        color: '#fbbf24',
+        roughness: 0.46,
+        sheen: 0.75,
+        sheenColor: new THREE.Color('#fef08a'),
+      });
+      const wlAntherMat = new THREE.MeshPhysicalMaterial({
+        color: '#38bdf8',
+        roughness: 0.42,
+        sheen: 0.85,
+        sheenColor: new THREE.Color('#bae6fd'),
+      });
+      this.geometriesToDispose.push(solarCupGeo, wlFilGeo, wlAntherGeo);
+      this.materialsToDispose.push(solarCupMat, wlFilMat, wlAntherMat);
+
+      const wlStamenCount = 52;
+      for (let i = 0; i < wlStamenCount; i++) {
+        const t = i / (wlStamenCount - 1);
+        const yaw = i * GOLDEN_ANGLE;
+        const r = envelope.stamenMinRadius + (envelope.stamenMaxRadius - envelope.stamenMinRadius) * t;
+        const pivot = new THREE.Group();
+        pivot.position.set(Math.cos(yaw) * r, 0.022 - t * 0.003, Math.sin(yaw) * r);
+        pivot.rotation.y = -yaw - Math.PI / 2;
+        pivot.scale.set(1.0, 0.78 + 0.36 * t, 1.0);
+        const fMesh = new THREE.Mesh(wlFilGeo, wlFilMat);
+        const aMesh = new THREE.Mesh(wlAntherGeo, wlAntherMat);
+        pivot.add(fMesh, aMesh);
+        this.flowerHeadGroup.add(pivot);
+        this.stamenPivots.push({
+          pivot,
+          closedPitch: 0.1 + 0.12 * t,
+          openPitch: 0.28 + 0.48 * t,
+          baseRoll: organicNoise(i * 3.3) * 0.06,
+          phaseOffset: i * 0.37,
+        });
+      }
+      return;
     }
 
     const isLily = morph === 'lily-recurved';
-    const stamenCount = isLily ? 6 : 68;
-    const filLen = isLily ? 0.165 : morph === 'lotus-pod' ? 0.046 : 0.062;
+    const isCamellia = morph === 'camellia-fibonacci';
+    const stamenCount = isLily ? 6 : isCamellia ? 38 : 68;
+    const filLen = isLily ? 0.165 : morph === 'lotus-pod' ? 0.046 : isCamellia ? 0.048 : 0.062;
 
     const filCurve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(0, 0, 0),
@@ -1660,7 +2072,10 @@ export class ProceduralFlowerModel extends THREE.Group {
       sheen: 0.88,
       sheenRoughness: 0.55,
       sheenColor: new THREE.Color('#fef9c3'),
+      emissive: new THREE.Color(isLily ? '#7f1d1d' : '#f59e0b'),
+      emissiveIntensity: 0.04,
     });
+    this.antherMaterials.push(antherMat);
     this.geometriesToDispose.push(filamentGeo, antherGeo);
     this.materialsToDispose.push(filamentMat, antherMat);
 
@@ -1702,6 +2117,20 @@ export class ProceduralFlowerModel extends THREE.Group {
         this.flowerHeadGroup.add(lobe);
         this.geometriesToDispose.push(lobeGeo);
       }
+    } else if (isCamellia) {
+      // Camellia japonica: 3-fid pale-jade central style (三裂浅碧花柱) without Peony magenta carpels
+      const camStyleGeo = new THREE.CylinderGeometry(0.0022, 0.0034, 0.038, 10);
+      camStyleGeo.translate(0, 0.022, 0);
+      const camStyleMat = new THREE.MeshPhysicalMaterial({
+        color: '#d9f99d',
+        roughness: 0.42,
+        sheen: 0.7,
+        sheenColor: new THREE.Color('#fef9c3'),
+      });
+      const camStyleMesh = new THREE.Mesh(camStyleGeo, camStyleMat);
+      this.flowerHeadGroup.add(camStyleMesh);
+      this.geometriesToDispose.push(camStyleGeo);
+      this.materialsToDispose.push(camStyleMat);
     } else if (morph !== 'lotus-pod') {
       const carpelMat = new THREE.MeshPhysicalMaterial({
         color: '#74a857',
@@ -1787,6 +2216,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         openPitch,
         baseRoll: organicNoise(i * 3.7) * 0.11,
         phaseOffset: i * 0.41,
+        normalizedRank: t,
       });
     }
   }
@@ -1798,10 +2228,15 @@ export class ProceduralFlowerModel extends THREE.Group {
     const morph = this.spec.morphology;
     const envelope = computeFloralShellEnvelope(this.spec);
 
-    const sepalCount = morph === 'sunflower-capitulum' ? 24 : 6;
+    const isMonocot =
+      morph === 'iris-bearded' ||
+      morph === 'lily-recurved' ||
+      morph === 'orchid-zygomorphic';
+    const sepalCount =
+      morph === 'sunflower-capitulum' ? 24 : isMonocot ? 3 : 6;
     const sepalGeo = createSculptedPetalGeometry(
-      0.132,
-      0.058,
+      isMonocot ? 0.064 : 0.132,
+      isMonocot ? 0.028 : 0.058,
       0.18,
       1.5,
       0.0028,
@@ -1840,7 +2275,9 @@ export class ProceduralFlowerModel extends THREE.Group {
 
     for (let i = 0; i < sepalCount; i++) {
       const yaw = (i / sepalCount) * Math.PI * 2 + (i % 2) * 0.06;
-      const rad = envelope.sepalRadius + (i % 2) * 0.003;
+      const rad = isMonocot
+        ? 0.032
+        : envelope.sepalRadius + (i % 2) * 0.003;
       const pivot = new THREE.Group();
       pivot.position.set(
         Math.cos(yaw) * rad,
@@ -1928,38 +2365,54 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.spec.centerPetals;
 
     const widthBias =
-      morph === 'waterlily-stellate' || morph === 'sunflower-capitulum'
-        ? 0.5
-        : morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
-          ? 0.68
-          : 0.62;
+      morph === 'waterlily-stellate'
+        ? 0.44
+        : morph === 'sunflower-capitulum'
+          ? 0.48
+          : morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
+            ? 0.68
+            : 0.62;
     const tipRoundness =
       morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
-        ? 0.95
+        ? 0.94
         : morph === 'lotus-pod'
-          ? 0.72
+          ? 0.68
           : morph === 'sunflower-capitulum'
-            ? 0.42
-            : 0.35;
-    const recurve = morph === 'peony-ruffled' ? 0.26 : 0.2;
+            ? 0.28
+            : 0.18;
+    const recurve =
+      morph === 'peony-ruffled'
+        ? 0.26
+        : morph === 'camellia-fibonacci'
+          ? 0.14
+          : 0.2;
 
     const tierSamples = [0.12, 0.24, 0.38, 0.52, 0.66, 0.78, 0.9, 1.0];
     const tierGeometries = tierSamples.map((tierT, idx) => {
       const lenScale =
-        0.62 + 0.42 * Math.sin(Math.pow(tierT, 0.68) * (Math.PI / 2));
-      const widScale = 0.78 + 0.3 * tierT;
+        morph === 'sunflower-capitulum'
+          ? 0.88 + 0.16 * Math.sin(tierT * Math.PI)
+          : 0.62 + 0.42 * Math.sin(Math.pow(tierT, 0.68) * (Math.PI / 2));
+      const widScale =
+        morph === 'sunflower-capitulum'
+          ? 0.88 + 0.2 * tierT
+          : 0.78 + 0.3 * tierT;
       const aoFactor = 0.48 - tierT * 0.18;
-      // Inner tiers have deeper spoon cupping (1.18x) to form a lush 3D chalice bowl;
-      // outer tiers flare and gently recurve at their tips!
       const tierCup = this.spec.cupDepth * (1.18 - tierT * 0.28);
       const tierRecurve = recurve * Math.pow(tierT, 1.35);
+      const notchDepth =
+        morph === 'sunflower-capitulum'
+          ? 0.016
+          : morph === 'peony-ruffled'
+            ? this.spec.tipNotchDepth * (0.8 + 0.6 * tierT)
+            : this.spec.tipNotchDepth;
       const geo = createSculptedPetalGeometry(
         this.spec.petalLength * lenScale,
         this.spec.petalWidth * widScale,
         tierCup,
         this.spec.ruffleFrequency,
         this.spec.ruffleAmplitude * (0.85 + 0.45 * tierT),
-        this.spec.tipNotchDepth,
+        notchDepth,
         widthBias,
         aoFactor,
         tierRecurve,
@@ -1971,17 +2424,29 @@ export class ProceduralFlowerModel extends THREE.Group {
       return geo;
     });
 
-    const minR = envelope.petalMinRadius;
-    const maxR = envelope.petalMaxRadius;
+    // For Sunflower capitulum, ray florets attach strictly around the outer rim of the seed disc
+    const minR =
+      morph === 'sunflower-capitulum'
+        ? envelope.coreMaxRadius * 0.88
+        : envelope.petalMinRadius;
+    const maxR =
+      morph === 'sunflower-capitulum'
+        ? envelope.coreMaxRadius * 1.04
+        : envelope.petalMaxRadius;
 
     for (let i = 0; i < totalPetals; i++) {
       const rank01 = i / Math.max(1, totalPetals - 1);
-      const yawJitter = organicNoise(i * 3.73) * 0.042;
-      const yaw = i * GOLDEN_ANGLE + yawJitter;
+      const yawJitter = organicNoise(i * 3.73) * 0.036;
+      const yaw =
+        morph === 'sunflower-capitulum'
+          ? (i / totalPetals) * Math.PI * 2 + (i % 2) * 0.055 + yawJitter * 0.5
+          : i * GOLDEN_ANGLE + yawJitter;
       const r = minR + (maxR - minR) * Math.pow(rank01, 0.9);
       const yOffset =
-        envelope.petalTopY -
-        (envelope.petalTopY - envelope.petalBottomY) * rank01;
+        morph === 'sunflower-capitulum'
+          ? 0.028 - rank01 * 0.008
+          : envelope.petalTopY -
+            (envelope.petalTopY - envelope.petalBottomY) * rank01;
 
       const tierIdx = Math.min(
         tierGeometries.length - 1,
@@ -1992,9 +2457,9 @@ export class ProceduralFlowerModel extends THREE.Group {
       const pivot = new THREE.Group();
       pivot.position.set(Math.cos(yaw) * r, yOffset, Math.sin(yaw) * r);
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 6.17) * 0.095;
-      const naturalScaleX = 0.92 + organicNoise(i * 9.41) * 0.09;
-      const naturalScaleY = 0.94 + organicNoise(i * 4.83) * 0.07;
+      const baseRoll = organicNoise(i * 6.17) * 0.085;
+      const naturalScaleX = 0.93 + organicNoise(i * 9.41) * 0.08;
+      const naturalScaleY = 0.95 + organicNoise(i * 4.83) * 0.06;
       pivot.rotation.y = baseYaw;
 
       const mesh = new THREE.Mesh(geo, petalMaterial);
@@ -2009,13 +2474,14 @@ export class ProceduralFlowerModel extends THREE.Group {
         (envelope.petalClosedPitchRange[1] -
           envelope.petalClosedPitchRange[0]) *
           rank01;
-      // Progressive 3D chalice bowl pitch curve: inner petals cup upward around the heart,
-      // middle petals form a deep bowl, and outer guard petals flare gracefully!
       const openPitch =
-        envelope.petalOpenPitchRange[0] +
-        (envelope.petalOpenPitchRange[1] - envelope.petalOpenPitchRange[0]) *
-          Math.pow(rank01, 1.05) +
-        organicNoise(i * 2.53) * 0.038;
+        morph === 'sunflower-capitulum'
+          ? 1.38 + rank01 * 0.24 + organicNoise(i * 2.53) * 0.03
+          : envelope.petalOpenPitchRange[0] +
+            (envelope.petalOpenPitchRange[1] -
+              envelope.petalOpenPitchRange[0]) *
+              Math.pow(rank01, 1.05) +
+            organicNoise(i * 2.53) * 0.038;
 
       this.petalPivots.push({
         pivot,
@@ -2108,94 +2574,120 @@ export class ProceduralFlowerModel extends THREE.Group {
     roughTex: THREE.CanvasTexture,
   ): void {
     const sepalGeo = createSculptedPetalGeometry(
-      0.25,
-      0.13,
+      0.255,
+      0.132,
       0.16,
       1.8,
-      0.005,
+      0.0045,
       0,
-      0.62,
+      0.58,
       0.26,
-      0.16,
-      0.75,
+      0.14,
+      0.68,
       0,
       0.3,
     );
     const wingGeo = createSculptedPetalGeometry(
-      0.27,
-      0.22,
+      0.275,
+      0.228,
       0.2,
-      2.8,
-      0.0085,
-      0.02,
+      2.6,
+      0.0075,
+      0.015,
       0.7,
       0.24,
-      0.14,
+      0.12,
       0.92,
       0,
       1.1,
     );
-    const lipGeo = createSculptedPetalGeometry(
-      0.195,
-      0.15,
-      0.26,
-      3.8,
-      0.0095,
-      0.12,
+    // Mid-lobe of the trilobed labellum (蝴蝶兰中央舌瓣)
+    const lipMidGeo = createSculptedPetalGeometry(
+      0.185,
+      0.138,
+      0.28,
+      3.4,
+      0.008,
+      0.1,
       0.72,
       0.22,
-      0.12,
-      0.85,
+      0.08,
+      0.78,
       0,
       2.2,
     );
+    // Lateral side-lobes of the trilobed labellum (两侧向上包拢合蕊柱的侧裂片)
+    const lipSideLobeGeo = createSculptedPetalGeometry(
+      0.115,
+      0.072,
+      0.3,
+      2.0,
+      0.004,
+      0,
+      0.66,
+      0.24,
+      -0.12,
+      0.86,
+      0,
+      0.8,
+    );
     const lipMat = new THREE.MeshPhysicalMaterial({
-      color: '#e61972',
+      map: getOrchidLipTexture(),
       vertexColors: true,
       roughness: 0.72,
       roughnessMap: roughTex,
       clearcoat: 0.0,
-      sheen: 0.98,
-      sheenRoughness: 0.42,
+      sheen: 0.45,
+      sheenRoughness: 0.55,
       sheenColor: new THREE.Color('#ffd166'),
       normalMap: normalTex,
-      normalScale: new THREE.Vector2(0.35, 0.35),
+      normalScale: new THREE.Vector2(0.48, 0.48),
       side: THREE.DoubleSide,
     });
     applyUE5FoliageSubsurfaceShader(
       lipMat,
       '#ff9e00',
-      0.46,
+      0.28,
       this.animatedShaderUniforms,
-      0.009,
+      0.008,
     );
 
-    const callusGeo = new THREE.CapsuleGeometry(0.0055, 0.018, 6, 12);
+    const callusGeo = new THREE.CapsuleGeometry(0.0058, 0.018, 8, 12);
     const callusMat = new THREE.MeshPhysicalMaterial({
-      color: '#d97706',
-      roughness: 0.45,
+      color: '#f59e0b',
+      roughness: 0.42,
+      sheen: 0.6,
+      sheenColor: new THREE.Color('#fef08a'),
     });
 
-    this.geometriesToDispose.push(sepalGeo, wingGeo, lipGeo, callusGeo);
+    this.geometriesToDispose.push(
+      sepalGeo,
+      wingGeo,
+      lipMidGeo,
+      lipSideLobeGeo,
+      callusGeo,
+    );
     this.materialsToDispose.push(lipMat, callusMat);
     this.meshMaterialsForMode.push(lipMat);
 
-    const sepalAngles = [Math.PI * 0.5, Math.PI * 1.2, Math.PI * 1.8];
+    // 1 Dorsal Sepal (top/back: Math.PI * 1.5) + 2 Lateral Sepals (lower-front left/right: Math.PI * 0.28 & Math.PI * 0.72)
+    const sepalAngles = [Math.PI * 1.5, Math.PI * 0.28, Math.PI * 0.72];
     sepalAngles.forEach((yaw, i) => {
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.042, 0.014, Math.sin(yaw) * 0.042);
+      pivot.position.set(Math.cos(yaw) * 0.038, 0.016, Math.sin(yaw) * 0.038);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
       const mesh = new THREE.Mesh(sepalGeo, petalMaterial);
       mesh.castShadow = true;
+      mesh.receiveShadow = true;
       pivot.add(mesh);
       this.flowerHeadGroup.add(pivot);
       this.petalPivots.push({
         pivot,
         mesh,
-        normalizedRank: 0.9,
-        closedPitch: 0.34,
-        openPitch: 1.48,
+        normalizedRank: 0.88,
+        closedPitch: 0.32,
+        openPitch: i === 0 ? 1.32 : 1.44,
         baseYaw,
         baseRoll: organicNoise(i * 3.1) * 0.05,
         naturalScaleX: 1.0,
@@ -2204,7 +2696,8 @@ export class ProceduralFlowerModel extends THREE.Group {
       });
     });
 
-    const wingAngles = [0.1, Math.PI - 0.1];
+    // 2 Broad Lateral Wing Petals (宽展蝶翼侧花瓣)
+    const wingAngles = [-0.06, Math.PI + 0.06];
     wingAngles.forEach((yaw, i) => {
       const pivot = new THREE.Group();
       pivot.position.set(Math.cos(yaw) * 0.032, 0.024, Math.sin(yaw) * 0.032);
@@ -2212,14 +2705,15 @@ export class ProceduralFlowerModel extends THREE.Group {
       pivot.rotation.y = baseYaw;
       const mesh = new THREE.Mesh(wingGeo, petalMaterial);
       mesh.castShadow = true;
+      mesh.receiveShadow = true;
       pivot.add(mesh);
       this.flowerHeadGroup.add(pivot);
       this.petalPivots.push({
         pivot,
         mesh,
-        normalizedRank: 0.55,
+        normalizedRank: 0.52,
         closedPitch: 0.22,
-        openPitch: 1.28,
+        openPitch: 1.22,
         baseYaw,
         baseRoll: (i === 0 ? 1 : -1) * 0.06,
         naturalScaleX: 1.0,
@@ -2228,15 +2722,42 @@ export class ProceduralFlowerModel extends THREE.Group {
       });
     });
 
+    // 2 Upturned Lateral Lip Lobes framing the arcuate Gynostemium column at the front (+Z)
+    for (const side of [-1, 1]) {
+      const sideYaw = Math.PI * 0.5 + side * 0.42;
+      const sidePivot = new THREE.Group();
+      sidePivot.position.set(side * 0.02, 0.026, 0.026);
+      const baseYaw = -sideYaw - Math.PI / 2;
+      sidePivot.rotation.y = baseYaw;
+      const sideMesh = new THREE.Mesh(lipSideLobeGeo, lipMat);
+      sideMesh.castShadow = true;
+      sidePivot.add(sideMesh);
+      this.flowerHeadGroup.add(sidePivot);
+      this.petalPivots.push({
+        pivot: sidePivot,
+        mesh: sideMesh,
+        normalizedRank: 0.22,
+        closedPitch: 0.14,
+        openPitch: 0.64,
+        baseYaw,
+        baseRoll: side * 0.18,
+        naturalScaleX: 1.0,
+        naturalScaleY: 1.0,
+        phaseOffset: 5 + side,
+      });
+    }
+
+    // Central Mid-Lobe of Labellum projecting forward (+Z) at yaw = Math.PI * 0.5 (baseYaw = -Math.PI)
     const lipPivot = new THREE.Group();
-    lipPivot.position.set(0, 0.02, 0.034);
-    const lipBaseYaw = 0;
+    lipPivot.position.set(0, 0.02, 0.036);
+    const lipBaseYaw = -Math.PI;
     lipPivot.rotation.y = lipBaseYaw;
-    const lipMesh = new THREE.Mesh(lipGeo, lipMat);
+    const lipMesh = new THREE.Mesh(lipMidGeo, lipMat);
     lipMesh.castShadow = true;
+    lipMesh.receiveShadow = true;
 
     const {position: cPos, normal: cNorm} = samplePetalSurfacePointAndNormal(
-      lipGeo,
+      lipMidGeo,
       0,
       0.24,
     );
@@ -2245,7 +2766,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       callus.position
         .copy(cPos)
         .addScaledVector(cNorm, 0.0055)
-        .add(new THREE.Vector3(side * 0.008, 0, 0));
+        .add(new THREE.Vector3(side * 0.0085, 0, 0));
       lipMesh.add(callus);
     }
 
@@ -2256,7 +2777,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       mesh: lipMesh,
       normalizedRank: 0.28,
       closedPitch: 0.16,
-      openPitch: 1.18,
+      openPitch: 1.24,
       baseYaw: lipBaseYaw,
       baseRoll: 0,
       naturalScaleX: 1.0,
@@ -2266,52 +2787,57 @@ export class ProceduralFlowerModel extends THREE.Group {
   }
 
   private buildIrisCorolla(petalMaterial: THREE.MeshPhysicalMaterial): void {
+    // 1. Drooping Outer Falls (下垂反卷金须垂瓣)
     const fallGeo = createSculptedPetalGeometry(
-      0.27,
-      0.165,
-      0.22,
-      4.5,
-      0.0095,
-      0.03,
-      0.68,
+      0.265,
+      0.158,
+      0.20,
+      3.8,
+      0.008,
+      0.02,
+      0.66,
       0.26,
-      0.26,
-      0.88,
+      0.24,
+      0.86,
       0,
       0.6,
     );
+    // 2. Upright Vaulted Standards (直立拱冠旗瓣: clean 0.06 outward flare so the 3 standards never cross or clump)
     const standardGeo = createSculptedPetalGeometry(
-      0.245,
-      0.155,
-      0.24,
-      4.0,
-      0.0085,
-      0.025,
-      0.66,
-      0.24,
-      -0.06,
-      0.88,
+      0.238,
+      0.128,
+      0.16,
+      3.2,
+      0.006,
+      0.02,
+      0.62,
+      0.22,
+      0.06,
+      0.84,
       0,
-      1.5,
+      1.2,
     );
+    // 3. Overarching Bifid Style Arms (花柱分枝)
     const styleArmGeo = createSculptedPetalGeometry(
       0.135,
       0.048,
-      0.2,
+      0.16,
       1.5,
-      0.003,
+      0.0025,
       0.06,
       0.55,
-      0.24,
-      0.18,
-      0.65,
+      0.22,
+      0.14,
+      0.62,
     );
 
-    const beardTuftGeo = new THREE.ConeGeometry(0.0038, 0.011, 7);
+    const beardTuftGeo = new THREE.ConeGeometry(0.0022, 0.0048, 6);
     beardTuftGeo.rotateX(Math.PI / 2);
-    const beardMat = new THREE.MeshStandardMaterial({
+    const beardMat = new THREE.MeshPhysicalMaterial({
       color: '#f59e0b',
-      roughness: 0.55,
+      roughness: 0.44,
+      sheen: 0.82,
+      sheenColor: new THREE.Color('#fef08a'),
     });
     this.geometriesToDispose.push(
       fallGeo,
@@ -2324,7 +2850,7 @@ export class ProceduralFlowerModel extends THREE.Group {
     for (let i = 0; i < 3; i++) {
       const yaw = (i / 3) * Math.PI * 2;
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.046, 0.016, Math.sin(yaw) * 0.046);
+      pivot.position.set(Math.cos(yaw) * 0.048, 0.018, Math.sin(yaw) * 0.048);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
 
@@ -2332,16 +2858,18 @@ export class ProceduralFlowerModel extends THREE.Group {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
 
-      for (let tIdx = 0; tIdx < 18; tIdx++) {
-        const vNorm = 0.1 + (tIdx / 17) * 0.34;
-        const uNorm = ((tIdx % 3) - 1) * 0.045;
+      // Low-profile golden velvet beard along the white-gold signal midline
+      for (let tIdx = 0; tIdx < 45; tIdx++) {
+        const vNorm = 0.14 + (tIdx / 44) * 0.24;
+        const rowMod = (tIdx % 3) - 1;
+        const uNorm = rowMod * 0.036 + organicNoise(tIdx * 3.1) * 0.01;
         const {position, normal} = samplePetalSurfacePointAndNormal(
           fallGeo,
           uNorm,
           vNorm,
         );
         const tuft = new THREE.Mesh(beardTuftGeo, beardMat);
-        tuft.position.copy(position).addScaledVector(normal, 0.0035);
+        tuft.position.copy(position).addScaledVector(normal, 0.0012);
         mesh.add(tuft);
       }
 
@@ -2352,10 +2880,10 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: 0.88,
-        closedPitch: 0.34,
-        openPitch: 1.52,
+        closedPitch: 0.24,
+        openPitch: 1.08,
         baseYaw,
-        baseRoll: organicNoise(i * 4.1) * 0.05,
+        baseRoll: organicNoise(i * 4.1) * 0.04,
         naturalScaleX: 1.0,
         naturalScaleY: 1.0,
         phaseOffset: i,
@@ -2369,14 +2897,15 @@ export class ProceduralFlowerModel extends THREE.Group {
       );
       stylePivot.rotation.y = baseYaw;
       const styleMesh = new THREE.Mesh(styleArmGeo, petalMaterial);
+      styleMesh.castShadow = true;
       stylePivot.add(styleMesh);
       this.flowerHeadGroup.add(stylePivot);
       this.petalPivots.push({
         pivot: stylePivot,
         mesh: styleMesh,
         normalizedRank: 0.52,
-        closedPitch: 0.22,
-        openPitch: 0.98,
+        closedPitch: 0.20,
+        openPitch: 0.82,
         baseYaw,
         baseRoll: 0,
         naturalScaleX: 1.0,
@@ -2385,10 +2914,11 @@ export class ProceduralFlowerModel extends THREE.Group {
       });
     }
 
+    // 3 Upright Standards opening gracefully into a well-separated 3-part Iris crown
     for (let i = 0; i < 3; i++) {
       const yaw = (i / 3) * Math.PI * 2 + Math.PI / 3;
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.034, 0.028, Math.sin(yaw) * 0.034);
+      pivot.position.set(Math.cos(yaw) * 0.038, 0.030, Math.sin(yaw) * 0.038);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
 
@@ -2401,11 +2931,11 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.petalPivots.push({
         pivot,
         mesh,
-        normalizedRank: 0.25,
+        normalizedRank: 0.24,
         closedPitch: 0.14,
-        openPitch: 0.64,
+        openPitch: 0.58,
         baseYaw,
-        baseRoll: organicNoise((i + 3) * 3.7) * 0.06,
+        baseRoll: organicNoise((i + 3) * 3.7) * 0.03,
         naturalScaleX: 1.0,
         naturalScaleY: 1.0,
         phaseOffset: i + 3,
@@ -2432,51 +2962,69 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.geometriesToDispose.push(dropGeo);
     this.materialsToDispose.push(dropMat);
 
-    const outerPetals = this.petalPivots.filter((p) => p.normalizedRank >= 0.55);
-    for (let i = 0; i < Math.min(10, outerPetals.length); i += 2) {
+    const outerPetals = this.petalPivots.filter((p) => p.normalizedRank >= 0.48);
+    for (let i = 0; i < Math.min(14, outerPetals.length); i += 2) {
       const targetPetal = outerPetals[i];
-      const uNorm = (i % 4 === 0 ? 1 : -1) * 0.28;
-      const vNorm = 0.48 + (i % 3) * 0.12;
+      const uNorm = (i % 4 === 0 ? 1 : -1) * (0.22 + (i % 3) * 0.05);
+      const baseVNorm = 0.44 + (i % 3) * 0.12;
       const {position, normal} = samplePetalSurfacePointAndNormal(
         targetPetal.mesh.geometry,
         uNorm,
-        vNorm,
+        baseVNorm,
       );
 
       const drop = new THREE.Mesh(dropGeo, dropMat);
       drop.position.copy(position).addScaledVector(normal, dropRadius * 0.62);
       targetPetal.mesh.add(drop);
+      this.dewdropItems.push({
+        mesh: drop,
+        targetGeometry: targetPetal.mesh.geometry,
+        uNorm,
+        baseVNorm,
+        dropRadius,
+      });
     }
   }
 
   private buildFloatingPollenHalo(): void {
-    const moteGeo = new THREE.SphereGeometry(0.0021, 8, 8);
+    const moteGeo = new THREE.SphereGeometry(0.002, 8, 8);
     const isBiolum = this.spec.morphology === 'waterlily-stellate';
     const moteMat = new THREE.MeshBasicMaterial({
       color: isBiolum ? '#80ffdb' : '#fde047',
       transparent: true,
-      opacity: 0.78,
+      opacity: 0.76,
     });
     this.geometriesToDispose.push(moteGeo);
     this.materialsToDispose.push(moteMat);
 
     this.flowerHeadGroup.add(this.pollenHaloGroup);
 
-    const moteCount = 16;
+    const moteCount = IS_HEADLESS ? 18 : 32;
     for (let i = 0; i < moteCount; i++) {
       const mesh = new THREE.Mesh(moteGeo, moteMat);
       const baseAngle = i * GOLDEN_ANGLE;
-      const baseRadius = 0.024 + (i / moteCount) * 0.075;
-      const baseY = 0.055 + (i % 5) * 0.018;
-      const scale = 0.65 + (i % 3) * 0.28;
-      mesh.scale.setScalar(scale);
+      const baseRadius = 0.02 + (i / moteCount) * 0.058;
+      const baseY = 0.048 + (i % 6) * 0.015;
+      const baseScale = 0.58 + (i % 3) * 0.24;
+      const x = Math.cos(baseAngle) * baseRadius;
+      const z = Math.sin(baseAngle) * baseRadius;
+      mesh.position.set(x, baseY, z);
+      mesh.scale.setScalar(baseScale);
       this.pollenHaloGroup.add(mesh);
       this.pollenMotes.push({
         mesh,
+        state: {
+          x,
+          y: baseY,
+          z,
+          vx: -Math.sin(baseAngle) * 0.012,
+          vy: 0.015,
+          vz: Math.cos(baseAngle) * 0.012,
+        },
         baseRadius,
-        baseAngle,
         baseY,
-        speed: 0.65 + (i % 4) * 0.22,
+        baseScale,
+        speed: 0.58 + (i % 4) * 0.18,
         phase: i * 0.85,
       });
     }
@@ -2509,31 +3057,39 @@ export class ProceduralFlowerModel extends THREE.Group {
     }
 
     const samples: RawSplatSample[] = [];
+    const corollaCount = Math.max(
+      6,
+      this.petalPivots.filter((p) => p.normalizedRank >= 0).length,
+    );
     const splatsPerPetal = IS_HEADLESS
-      ? Math.max(24, Math.round(960 / Math.max(6, this.petalPivots.length)))
-      : Math.max(72, Math.round(4800 / Math.max(6, this.petalPivots.length)));
+      ? clamp(Math.round(820 / corollaCount), 18, 48)
+      : clamp(Math.round(4200 / corollaCount), 56, 160);
+
+    // Width ratio relative to reference petal width (0.14m) so narrow petals never overflow!
+    const speciesWidthFactor = clamp(this.spec.petalWidth / 0.14, 0.48, 1.15);
 
     this.petalPivots.forEach((pItem, pIdx) => {
       const isSepal = pItem.normalizedRank < 0;
       const count = isSepal
-        ? Math.max(10, Math.round(splatsPerPetal * 0.35))
+        ? Math.max(8, Math.round(splatsPerPetal * 0.28))
         : splatsPerPetal;
       for (let s = 0; s < count; s++) {
         const t = (s + 0.5) / count;
         const frac = (s * 0.61803398875) % 1;
-        const vNorm = clamp(Math.pow(t, 0.75), 0.06, 0.98);
+        // Inset vNorm in [0.10, 0.84] and uNorm in [-0.74, 0.74] so splat footprints NEVER bleed past petal tips/edges!
+        const vNorm = clamp(0.1 + Math.pow(t, 0.78) * 0.74, 0.1, 0.84);
         const uRaw = frac * 2 - 1;
         const uNorm = clamp(
-          Math.sign(uRaw) * Math.pow(Math.abs(uRaw), 0.68),
-          -0.98,
-          0.98,
+          Math.sign(uRaw) * Math.pow(Math.abs(uRaw), 0.76) * 0.74,
+          -0.74,
+          0.74,
         );
 
         let sh0: [number, number, number];
         let sh1: [number, number, number];
         if (isSepal) {
           sh0 = [0.24, 0.52, 0.36];
-          sh1 = [0.38, 0.72, 0.52];
+          sh1 = [0.34, 0.66, 0.46];
         } else {
           const pig = sampleSpeciesPetalPigment(
             this.spec,
@@ -2546,18 +3102,33 @@ export class ProceduralFlowerModel extends THREE.Group {
         }
 
         const isEdgeOrThroat =
-          Math.abs(uNorm) > 0.82 || vNorm > 0.88 || vNorm < 0.18;
-        // Elongated anisotropic Gaussian splats along the petal tangent plane
-        const sx = (isEdgeOrThroat ? 0.018 : 0.026) * (0.78 + 0.32 * vNorm);
-        const sy = (isEdgeOrThroat ? 0.028 : 0.036) * (0.78 + 0.32 * vNorm);
-        const alpha = isSepal ? 0.34 : isEdgeOrThroat ? 0.36 : 0.44;
+          Math.abs(uNorm) > 0.58 || vNorm > 0.72 || vNorm < 0.22;
+        // Taper Gaussian covariance radii smoothly as splats approach the lateral edge or apex tip
+        const lateralTaper = clamp(1.0 - Math.abs(uNorm) * 0.52, 0.42, 1.0);
+        const longitudinalArch = clamp(
+          Math.sin(Math.pow(vNorm, 0.72) * Math.PI),
+          0.35,
+          1.0,
+        );
+        const baseWidthFactor = isSepal ? 0.42 : speciesWidthFactor;
+
+        const sx =
+          (isEdgeOrThroat ? 0.011 : 0.0155) *
+          baseWidthFactor *
+          lateralTaper *
+          longitudinalArch;
+        const sy =
+          (isEdgeOrThroat ? 0.016 : 0.022) *
+          (0.68 + 0.32 * longitudinalArch) *
+          clamp(1.0 - Math.pow(vNorm, 3.0) * 0.45, 0.5, 1.0);
+        const alpha = isSepal ? 0.28 : isEdgeOrThroat ? 0.3 : 0.38;
 
         samples.push({
           targetGroup: 'corolla',
           organIdx: pIdx,
           uNorm,
           vNorm,
-          normalOffset: (s % 2 === 0 ? 1 : -1) * 0.0012,
+          normalOffset: (s % 2 === 0 ? 1 : -1) * 0.0005,
           sx,
           sy,
           tipDist: vNorm,
@@ -2571,31 +3142,32 @@ export class ProceduralFlowerModel extends THREE.Group {
 
     const stamenStep = IS_HEADLESS ? 2 : 1;
     for (let sIdx = 0; sIdx < this.stamenPivots.length; sIdx += stamenStep) {
-      const splatsPerStamen = IS_HEADLESS ? 3 : 5;
+      const splatsPerStamen = IS_HEADLESS ? 2 : 4;
       for (let k = 0; k < splatsPerStamen; k++) {
-        const vNorm = 0.55 + (k / splatsPerStamen) * 0.45;
+        const vNorm = 0.62 + (k / splatsPerStamen) * 0.34;
         samples.push({
           targetGroup: 'stamen',
           organIdx: sIdx,
-          uNorm: organicNoise(sIdx * 7 + k) * 0.5,
+          uNorm: organicNoise(sIdx * 7 + k) * 0.35,
           vNorm,
-          normalOffset: 0.001,
-          sx: 0.0085,
-          sy: 0.0065,
+          normalOffset: 0.0004,
+          sx: 0.0052,
+          sy: 0.0045,
           tipDist: vNorm,
           isRimOrCore: 1.0,
-          sh0: [1.0, 0.84, 0.24],
-          alpha: 0.55,
-          sh1: [1.0, 0.96, 0.62],
+          sh0: [0.98, 0.8, 0.22],
+          alpha: 0.44,
+          sh1: [1.0, 0.92, 0.54],
         });
       }
     }
 
-    const budSplatsPerPetal = IS_HEADLESS ? 8 : 20;
+    // Keep companion bud crisp without oversized 3DGS splat halos
+    const budSplatsPerPetal = 0;
     this.companionBudPivots.forEach((bItem, bIdx) => {
       for (let s = 0; s < budSplatsPerPetal; s++) {
-        const vNorm = clamp((s + 0.5) / budSplatsPerPetal, 0.1, 0.95);
-        const uNorm = (((s * 0.6180339) % 1) * 2 - 1) * 0.9;
+        const vNorm = clamp(0.14 + ((s + 0.5) / budSplatsPerPetal) * 0.68, 0.14, 0.82);
+        const uNorm = (((s * 0.6180339) % 1) * 2 - 1) * 0.68;
         const pig = sampleSpeciesPetalPigment(
           this.spec,
           uNorm,
@@ -2607,36 +3179,36 @@ export class ProceduralFlowerModel extends THREE.Group {
           organIdx: bIdx,
           uNorm,
           vNorm,
-          normalOffset: 0.001,
-          sx: 0.014,
-          sy: 0.018,
+          normalOffset: 0.0004,
+          sx: 0.0055,
+          sy: 0.0075,
           tipDist: vNorm,
-          isRimOrCore: vNorm > 0.78 ? 1.0 : 0.0,
+          isRimOrCore: vNorm > 0.68 ? 1.0 : 0.0,
           sh0: pig.sh0,
-          alpha: 0.38,
+          alpha: 0.24,
           sh1: pig.sh1,
         });
       }
     });
 
-    const leafSplatsPerBlade = IS_HEADLESS ? 20 : 64;
+    const leafSplatsPerBlade = IS_HEADLESS ? 16 : 48;
     this.leafPivots.forEach((_, lIdx) => {
       for (let s = 0; s < leafSplatsPerBlade; s++) {
-        const vNorm = clamp((s + 0.5) / leafSplatsPerBlade, 0.08, 0.96);
-        const uNorm = (((s * 0.6180339) % 1) * 2 - 1) * 0.92;
+        const vNorm = clamp(0.12 + ((s + 0.5) / leafSplatsPerBlade) * 0.72, 0.12, 0.84);
+        const uNorm = (((s * 0.6180339) % 1) * 2 - 1) * 0.72;
         samples.push({
           targetGroup: 'leaf',
           organIdx: lIdx,
           uNorm,
           vNorm,
-          normalOffset: 0.0012,
-          sx: 0.018,
-          sy: 0.024,
+          normalOffset: 0.0005,
+          sx: 0.011,
+          sy: 0.015,
           tipDist: vNorm,
-          isRimOrCore: Math.abs(uNorm) > 0.8 ? 1.0 : 0.0,
-          sh0: [0.22, 0.5, 0.35],
-          alpha: 0.34,
-          sh1: [0.46, 0.84, 0.6],
+          isRimOrCore: Math.abs(uNorm) > 0.58 ? 1.0 : 0.0,
+          sh0: [0.22, 0.48, 0.34],
+          alpha: 0.28,
+          sh1: [0.42, 0.76, 0.54],
         });
       }
     });
@@ -2647,6 +3219,7 @@ export class ProceduralFlowerModel extends THREE.Group {
     const aCenterClosed = new Float32Array(N * 3);
     const aCenterMid = new Float32Array(N * 3);
     const aCenterOpen = new Float32Array(N * 3);
+    const aNormalClosed = new Float32Array(N * 3);
     const aNormalOpen = new Float32Array(N * 3);
     const aSplatScale = new Float32Array(N * 4);
     const aColorSH0 = new Float32Array(N * 4);
@@ -2707,7 +3280,7 @@ export class ProceduralFlowerModel extends THREE.Group {
                 ? 0.046
                 : 0.062;
           tmpPos.set(
-            smp.uNorm * 0.004,
+            smp.uNorm * 0.003,
             filLen * smp.vNorm,
             0.007 * smp.vNorm,
           );
@@ -2744,7 +3317,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       }
     };
 
-    captureCanonicalBloomState(0.0, aCenterClosed);
+    captureCanonicalBloomState(0.0, aCenterClosed, aNormalClosed);
     captureCanonicalBloomState(0.5, aCenterMid);
     captureCanonicalBloomState(1.0, aCenterOpen, aNormalOpen);
 
@@ -2785,6 +3358,10 @@ export class ProceduralFlowerModel extends THREE.Group {
       new THREE.InstancedBufferAttribute(aCenterOpen, 3),
     );
     instGeo.setAttribute(
+      'aNormalClosed',
+      new THREE.InstancedBufferAttribute(aNormalClosed, 3),
+    );
+    instGeo.setAttribute(
       'aNormalOpen',
       new THREE.InstancedBufferAttribute(aNormalOpen, 3),
     );
@@ -2804,8 +3381,10 @@ export class ProceduralFlowerModel extends THREE.Group {
     const splatUniforms = {
       uBloom: {value: 0.78},
       uTime: {value: 0.0},
-      uSplatScaleMultiplier: {value: 1.08},
-      uSplatOpacityMultiplier: {value: 0.26},
+      uTipUncurl: {value: 0.56},
+      uKineticContainment: {value: 1.0},
+      uSplatScaleMultiplier: {value: 0.68},
+      uSplatOpacityMultiplier: {value: 0.18},
       uPureSplatMode: {value: 0.0},
     };
     this.animatedShaderUniforms.push(splatUniforms);
@@ -2821,6 +3400,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         attribute vec3 aCenterClosed;
         attribute vec3 aCenterMid;
         attribute vec3 aCenterOpen;
+        attribute vec3 aNormalClosed;
         attribute vec3 aNormalOpen;
         attribute vec4 aSplatScale;
         attribute vec4 aColorSH0;
@@ -2828,6 +3408,8 @@ export class ProceduralFlowerModel extends THREE.Group {
 
         uniform float uBloom;
         uniform float uTime;
+        uniform float uTipUncurl;
+        uniform float uKineticContainment;
         uniform float uSplatScaleMultiplier;
         uniform float uSplatOpacityMultiplier;
         uniform float uPureSplatMode;
@@ -2836,8 +3418,6 @@ export class ProceduralFlowerModel extends THREE.Group {
         varying vec4 vColorAlpha;
 
         void main() {
-          // In hybrid mode (uPureSplatMode == 0), only render rim/margin & stamen/core 3DGS radiance wisps
-          // so petal interiors stay 100% silky and show crisp vascular vein details!
           if (uPureSplatMode < 0.5 && aSplatScale.w < 0.5) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             vSplatCoord = vec2(10.0, 10.0);
@@ -2850,32 +3430,33 @@ export class ProceduralFlowerModel extends THREE.Group {
           float l1 = -4.0 * b * (b - 1.0);
           float l2 = 2.0 * b * (b - 0.5);
           vec3 localCenter = l0 * aCenterClosed + l1 * aCenterMid + l2 * aCenterOpen;
+          vec3 localNormal = normalize(mix(aNormalClosed, aNormalOpen, b));
 
           float vTipDist = clamp(aSplatScale.z, 0.0, 1.0);
-          float flexWeight = vTipDist * vTipDist * (0.38 + 0.62 * b);
+          // Force-field kinetic containment damps high-speed wave splash while preserving tip uncurling
+          float flexWeight = vTipDist * vTipDist * (0.38 + 0.62 * b) * uKineticContainment;
           float worldPhase = localCenter.x * 22.0 + localCenter.y * 14.0 + localCenter.z * 18.0;
           float primaryWave = sin(uTime * 2.25 + worldPhase + vTipDist * 4.2);
-          localCenter.y += primaryWave * 0.006 * flexWeight;
-          localCenter.x += cos(uTime * 1.85 + worldPhase * 0.75) * 0.004 * flexWeight;
+          float tipZone = smoothstep(0.48, 1.0, vTipDist);
+          float uncurlOffset = -tipZone * tipZone * uTipUncurl * 0.008;
+          localCenter += localNormal * (primaryWave * 0.0028 * flexWeight + uncurlOffset);
 
           vec4 viewCenter4 = modelViewMatrix * vec4(localCenter, 1.0);
           vec3 viewCenter = viewCenter4.xyz;
-          vec3 viewNormal = normalize(normalMatrix * aNormalOpen);
+          vec3 viewNormal = normalize(normalMatrix * localNormal);
 
+          // Pure 3D surface tangent basis (zero screen-space billboard tilt -> zero splat edge overflow!)
           vec3 upVec = abs(viewNormal.y) < 0.92 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
           vec3 t1 = normalize(cross(upVec, viewNormal));
           vec3 t2 = normalize(cross(viewNormal, t1));
 
-          float sx = aSplatScale.x * uSplatScaleMultiplier * (0.76 + 0.24 * b);
-          float sy = aSplatScale.y * uSplatScaleMultiplier * (0.76 + 0.24 * b);
+          // Compress splat footprint by uKineticContainment at high interaction speeds so splats NEVER splash!
+          float sx = aSplatScale.x * uSplatScaleMultiplier * (0.78 + 0.22 * b) * uKineticContainment;
+          float sy = aSplatScale.y * uSplatScaleMultiplier * (0.78 + 0.22 * b) * uKineticContainment;
 
-          vec3 billT1 = mix(t1, vec3(1.0, 0.0, 0.0), 0.32);
-          vec3 billT2 = mix(t2, vec3(0.0, 1.0, 0.0), 0.32);
+          vSplatCoord = position.xy * 2.0;
+          vec3 splatOffset = t1 * (position.x * sx * 1.45) + t2 * (position.y * sy * 1.45) + viewNormal * 0.0008;
 
-          vSplatCoord = position.xy * 2.35;
-          vec3 splatOffset = billT1 * (position.x * sx * 2.1) + billT2 * (position.y * sy * 2.1) + viewNormal * 0.0018;
-
-          // Directional Lambertian shading + Degree-2 Spherical Harmonics so 3DGS splats have crisp 3D depth
           vec3 keyDir = normalize(vec3(0.48, 0.78, 0.38));
           float dirLambert = 0.56 + 0.44 * clamp(dot(viewNormal, keyDir), -0.35, 1.0);
 
@@ -2884,10 +3465,10 @@ export class ProceduralFlowerModel extends THREE.Group {
           float shY1 = 0.4886 * (viewDir.y * 0.45 + viewDir.z * 0.35 - viewDir.x * 0.25);
           float shY2 = 0.3154 * (3.0 * viewDir.z * viewDir.z - 1.0) * 0.22;
           float velvetGrazing = pow(1.0 - clamp(ndotv, 0.0, 1.0), 1.85);
-          float shMod = clamp(0.16 * (shY1 + shY2) + 0.28 * velvetGrazing, -0.1, 0.42);
+          float shMod = clamp(0.14 * (shY1 + shY2) + 0.24 * velvetGrazing, -0.1, 0.36);
 
-          vec3 shRadiance = clamp(aColorSH0.rgb * dirLambert + aColorSH1 * shMod, 0.0, 0.92);
-          vColorAlpha = vec4(shRadiance, clamp(aColorSH0.a * uSplatOpacityMultiplier, 0.0, 0.92));
+          vec3 shRadiance = clamp(aColorSH0.rgb * dirLambert + aColorSH1 * shMod, 0.0, 0.90);
+          vColorAlpha = vec4(shRadiance, clamp(aColorSH0.a * uSplatOpacityMultiplier, 0.0, 0.88));
 
           gl_Position = projectionMatrix * vec4(viewCenter + splatOffset, 1.0);
         }
@@ -2898,12 +3479,14 @@ export class ProceduralFlowerModel extends THREE.Group {
 
         void main() {
           float r2 = dot(vSplatCoord, vSplatCoord);
-          if (r2 > 5.5) discard;
-          float gaussianWeight = exp(-0.5 * r2);
+          if (r2 > 3.8) discard;
+          // Tight Gaussian kernel with smooth boundary window so splats NEVER bleed or show hard edges
+          float window = smoothstep(3.8, 1.1, r2);
+          float gaussianWeight = exp(-1.35 * r2) * window;
           float alpha = vColorAlpha.a * gaussianWeight;
-          if (alpha < 0.004) discard;
+          if (alpha < 0.005) discard;
 
-          vec3 col = vColorAlpha.rgb * (0.82 + 0.16 * gaussianWeight);
+          vec3 col = vColorAlpha.rgb * (0.85 + 0.15 * gaussianWeight);
           gl_FragColor = vec4(col, alpha);
         }
       `,
@@ -2923,28 +3506,60 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.materialsToDispose.push(this.gaussianSplatMaterial);
   }
 
-  setBloom(bloom01: number, elapsedSec: number): void {
+  getForceFieldState(): BloomForceFieldState {
+    return this.lastForceFieldState;
+  }
+
+  setBloom(
+    bloom01: number,
+    elapsedSec: number,
+    dt = 1 / 60,
+    bloomVelocity01PerSec = 0,
+    angularSpeedRadPerSec = 0,
+  ): void {
     this.currentBloom01 = clamp(bloom01, 0, 1);
     const b = this.currentBloom01;
+
+    // Evaluate Force-Field Damping & Multi-Stage Blooming Details
+    const damping = computeBloomForceFieldDamping(
+      b,
+      bloomVelocity01PerSec,
+      angularSpeedRadPerSec,
+    );
+    this.lastForceFieldState = damping;
+    const bloomDetails = evaluateDetailedBloomKinematics(
+      b,
+      bloomVelocity01PerSec,
+    );
 
     for (const u of this.animatedShaderUniforms) {
       u.uTime.value = elapsedSec;
       u.uBloom.value = b;
+      u.uTipUncurl.value = bloomDetails.tipUncurlFactor;
+      u.uKineticContainment.value = damping.splatKineticCompression;
+    }
+
+    // Modulate anther pollen dehiscence luminescence as stamens are exposed at b > 0.42
+    for (const aMat of this.antherMaterials) {
+      aMat.emissiveIntensity = 0.03 + bloomDetails.antherDehiscenceGlow * 0.11;
     }
 
     this.flowerHeadGroup.position.set(0, 0.045, 0);
     this.flowerHeadGroup.rotation.x =
       0.16 +
-      Math.cos(elapsedSec * 1.15) * 0.015 +
-      Math.sin(elapsedSec * 0.55) * 0.008;
+      (Math.cos(elapsedSec * 1.15) * 0.015 +
+        Math.sin(elapsedSec * 0.55) * 0.008) *
+        damping.splatKineticCompression;
     this.flowerHeadGroup.rotation.z =
-      Math.sin(elapsedSec * 0.95) * 0.015 +
-      Math.cos(elapsedSec * 0.6) * 0.006;
+      (Math.sin(elapsedSec * 0.95) * 0.015 +
+        Math.cos(elapsedSec * 0.6) * 0.006) *
+      damping.splatKineticCompression;
 
     this.coreGlowLight.intensity =
       0.05 + Math.pow(b, 1.1) * (0.06 + 0.015 * Math.sin(elapsedSec * 2.2));
 
-    // 1. Main Corolla Petals & Calyx Sepals: Cascading radial wave + 3-axis organic breathing
+    // 1. Main Corolla Petals & Calyx Sepals: Multi-stage cascading radial wave + tip uncurling + breathing
+    const kineticDamp = damping.splatKineticCompression;
     for (const item of this.petalPivots) {
       const basePitch = evaluateOrganPitchAtBloom(
         item.closedPitch,
@@ -2956,18 +3571,21 @@ export class ProceduralFlowerModel extends THREE.Group {
       const primaryFlutter =
         Math.sin(elapsedSec * 1.95 - rankDelay + item.phaseOffset) *
         0.028 *
-        (0.25 + 0.75 * b);
+        (0.25 + 0.75 * b) *
+        kineticDamp;
       const secondaryHarmonic =
         Math.cos(elapsedSec * 3.3 + item.phaseOffset * 1.7) *
         0.01 *
-        (0.2 + 0.8 * b);
+        (0.2 + 0.8 * b) *
+        kineticDamp;
 
       item.mesh.rotation.x = -(basePitch + primaryFlutter + secondaryHarmonic);
 
       const rollWave =
         Math.sin(elapsedSec * 1.65 + item.phaseOffset * 1.3 - rankDelay * 0.5) *
         0.024 *
-        (0.2 + 0.8 * b);
+        (0.2 + 0.8 * b) *
+        kineticDamp;
       item.mesh.rotation.z = item.baseRoll * (0.4 + 0.6 * b) + rollWave;
 
       if (item.normalizedRank >= 0) {
@@ -2975,20 +3593,26 @@ export class ProceduralFlowerModel extends THREE.Group {
           1.0 +
           Math.sin(elapsedSec * 1.95 - rankDelay + item.phaseOffset) *
             0.035 *
-            b;
-        const budCupScaleZ = (1.28 - 0.24 * b) * breathCupFlex;
-        const budWidthScaleX = (0.88 + 0.12 * b) * item.naturalScaleX;
+            b *
+            kineticDamp;
+        // At b=0, petals cup gently (1.12) to clasp the bud; as b->1, blade flattens & marginal ruffles expand
+        const budCupScaleZ = (1.12 - 0.14 * b) * breathCupFlex;
+        const budWidthScaleX =
+          (0.88 + 0.12 * bloomDetails.marginRuffleExpansion) *
+          item.naturalScaleX;
+        const budLengthScaleY =
+          (0.94 + 0.06 * Math.sin(b * Math.PI * 0.5)) * item.naturalScaleY;
         item.mesh.scale.set(
           budWidthScaleX,
-          item.naturalScaleY,
+          budLengthScaleY,
           budCupScaleZ,
         );
       }
 
       const spiralTwist =
-        item.normalizedRank >= 0 ? (1 - b) * 0.22 * item.normalizedRank : 0;
+        item.normalizedRank >= 0 ? (1 - b) * 0.24 * item.normalizedRank : 0;
       const azimuthSway =
-        Math.cos(elapsedSec * 1.4 + item.phaseOffset) * 0.014 * b;
+        Math.cos(elapsedSec * 1.4 + item.phaseOffset) * 0.014 * b * kineticDamp;
       item.pivot.rotation.y = item.baseYaw + spiralTwist + azimuthSway;
     }
 
@@ -3003,67 +3627,122 @@ export class ProceduralFlowerModel extends THREE.Group {
       const flutter =
         Math.sin(elapsedSec * 2.25 + budItem.phaseOffset) *
         0.022 *
-        (0.25 + 0.75 * b);
+        (0.25 + 0.75 * b) *
+        kineticDamp;
       budItem.mesh.rotation.x = -(budPitch + flutter);
       budItem.mesh.rotation.z =
         budItem.baseRoll +
-        Math.cos(elapsedSec * 1.8 + budItem.phaseOffset) * 0.016 * b;
+        Math.cos(elapsedSec * 1.8 + budItem.phaseOffset) * 0.016 * b * kineticDamp;
       const twist = (1 - b) * 0.18 * budItem.normalizedRank;
       budItem.pivot.rotation.y = budItem.baseYaw + twist;
     }
 
-    // 3. Stamens
+    // 3. Stamens: Cascading Fibonacci spiral uncurl from outer ring to inner heart
     for (const st of this.stamenPivots) {
+      const stRank = st.normalizedRank ?? 0.5;
+      // Outer stamens (stRank -> 1) uncurl slightly earlier than innermost stamens (stRank -> 0)
+      const staggeredBloom = clamp(b * (0.9 + 0.18 * stRank) - (1 - stRank) * 0.06, 0, 1);
       const baseStamenPitch = evaluateStamenPitchAtBloom(
         st.closedPitch,
         st.openPitch,
-        b,
+        staggeredBloom,
       );
       const pitchSway =
         (Math.sin(elapsedSec * 2.6 + st.phaseOffset) * 0.04 +
           Math.cos(elapsedSec * 4.1 - st.phaseOffset * 0.6) * 0.015) *
-        (0.15 + 0.85 * b);
+        (0.15 + 0.85 * b) *
+        kineticDamp;
       const rollSway =
         Math.cos(elapsedSec * 2.15 + st.phaseOffset * 1.2) *
         0.034 *
-        (0.15 + 0.85 * b);
+        (0.15 + 0.85 * b) *
+        kineticDamp;
       st.pivot.rotation.x = -(baseStamenPitch + pitchSway);
       st.pivot.rotation.z = st.baseRoll * b + rollSway;
     }
 
-    // 4. Stem Leaves
+    // 4. Sliding Crystalline Dewdrops along unfurling outer petals
+    const slideT = bloomDetails.dewdropSlideProgress;
+    for (let dIdx = 0; dIdx < this.dewdropItems.length; dIdx++) {
+      const item = this.dewdropItems[dIdx];
+      const vSlide = clamp(
+        item.baseVNorm + slideT * 0.12 + Math.sin(elapsedSec * 1.2 + dIdx) * 0.008 * b,
+        0.22,
+        0.82,
+      );
+      const {position, normal} = samplePetalSurfacePointAndNormal(
+        item.targetGeometry,
+        item.uNorm,
+        vSlide,
+      );
+      item.mesh.position
+        .copy(position)
+        .addScaledVector(normal, item.dropRadius * 0.62);
+      const tensionScale = 0.88 + 0.18 * Math.sin(b * Math.PI * 0.5);
+      item.mesh.scale.set(
+        tensionScale,
+        tensionScale * (0.72 - 0.08 * slideT),
+        tensionScale,
+      );
+    }
+
+    // 5. Stem Leaves
     for (const lf of this.leafPivots) {
       const pitchWave =
-        Math.sin(elapsedSec * 1.55 + lf.phaseOffset) * 0.028 +
-        Math.cos(elapsedSec * 2.7 + lf.phaseOffset) * 0.01;
+        (Math.sin(elapsedSec * 1.55 + lf.phaseOffset) * 0.028 +
+          Math.cos(elapsedSec * 2.7 + lf.phaseOffset) * 0.01) *
+        kineticDamp;
       const rollWave =
-        Math.cos(elapsedSec * 1.35 + lf.phaseOffset * 1.4) * 0.024;
+        Math.cos(elapsedSec * 1.35 + lf.phaseOffset * 1.4) * 0.024 * kineticDamp;
       lf.leafMesh.rotation.x = lf.basePitch + pitchWave;
       lf.leafMesh.rotation.z = lf.baseRoll + rollWave;
     }
 
-    // 5. Floating Pollen Motes
-    const haloVisible = b > 0.22;
+    // 6. Force-Field Damped Corolla Pollen & Nectar Micro-Vortex (Zero Splashing at High Speeds!)
+    const haloVisible = b > 0.16;
     this.pollenHaloGroup.visible = haloVisible;
     if (haloVisible) {
-      const bloomFactor = clamp((b - 0.22) / 0.78, 0, 1);
+      const bloomFactor = clamp((b - 0.16) / 0.84, 0, 1);
+      const maxCorollaR = damping.maxRadialEnvelope;
+      const minY = 0.032;
+      const maxY = 0.068 + bloomFactor * 0.072;
+
       for (const mote of this.pollenMotes) {
-        const ang =
-          mote.baseAngle +
-          elapsedSec * mote.speed * 0.45 +
-          Math.sin(elapsedSec + mote.phase) * 0.2;
-        const r =
-          mote.baseRadius *
-          (0.55 + 0.55 * bloomFactor) *
-          (1 + 0.12 * Math.sin(elapsedSec * 1.5 + mote.phase));
-        const yLift =
-          mote.baseY +
-          Math.sin(elapsedSec * 1.4 + mote.phase) * 0.018 * bloomFactor;
-        mote.mesh.position.set(
-          Math.cos(ang) * r,
-          yLift,
-          Math.sin(ang) * r,
+        // Inject controlled radial impulse from bloomVelocity, immediately governed by force-field damper
+        if (Math.abs(bloomVelocity01PerSec) > 0.05) {
+          const rCur = Math.hypot(mote.state.x, mote.state.z) || 1;
+          const radialImpulse = clamp(bloomVelocity01PerSec * 0.018, -0.04, 0.04);
+          mote.state.vx += (mote.state.x / rCur) * radialImpulse * dt;
+          mote.state.vz += (mote.state.z / rCur) * radialImpulse * dt;
+        }
+
+        const targetOrbitR = Math.min(
+          maxCorollaR * 0.86,
+          mote.baseRadius * (0.45 + 0.55 * bloomFactor),
         );
+        mote.state = stepForceFieldDampedParticle(mote.state, {
+          centerX: 0,
+          centerY: 0,
+          centerZ: 0,
+          targetOrbitRadius: targetOrbitR,
+          maxRadius: maxCorollaR,
+          minY,
+          maxY,
+          swirlSpeed: (0.018 + 0.024 * bloomFactor) * mote.speed,
+          updraftSpeed: (0.01 + 0.018 * bloomFactor) * mote.speed,
+          phase: mote.phase,
+          elapsedSec,
+          dt,
+          damping,
+        });
+
+        mote.mesh.position.set(mote.state.x, mote.state.y, mote.state.z);
+        const pulseScale =
+          mote.baseScale *
+          (0.45 + 0.55 * bloomFactor) *
+          (0.85 + 0.15 * Math.sin(elapsedSec * 2.8 + mote.phase)) *
+          damping.splatKineticCompression;
+        mote.mesh.scale.setScalar(pulseScale);
       }
     }
   }

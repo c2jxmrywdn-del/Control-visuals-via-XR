@@ -388,64 +388,34 @@ export const FLOWER_LIBRARY: FlowerSpec[] = [
 
 export const ENVIRONMENT_LIBRARY: EnvironmentSpec[] = [
   {
-    id: 'zen-pond',
-    nameZh: '晨雾禅池',
-    nameEn: 'Misty Zen Sanctuary',
-    subtitleZh: '温润晨光与水面涟漪',
-    bgHex: 0x0c0b10,
-    fogHex: 0x100e16,
-    ambientHex: 0x7c7288,
-    groundHex: 0x15131e,
-    keyLightHex: 0xfff6ed,
-    rimLightHex: 0xf4a261,
-    fillLightHex: 0xa8dadc,
-    particleHex: 0xffd166,
-    accentCss: '#f4a261',
+    id: 'translucent-white',
+    nameZh: '白透纯净展厅',
+    nameEn: 'Warm Translucent White Studio',
+    subtitleZh: '微饱和暖白透亮光感与羊脂玉瓷展台，温润凸显花瓣脉络细节',
+    bgHex: 0xfff4e2,
+    fogHex: 0xfae6c8,
+    ambientHex: 0xffeecf,
+    groundHex: 0xf7e2c2,
+    keyLightHex: 0xfff2dc,
+    rimLightHex: 0xffd296,
+    fillLightHex: 0xffe6be,
+    particleHex: 0xe09636,
+    accentCss: '#e08e2b',
   },
   {
-    id: 'moon-garden',
-    nameZh: '月华流萤',
-    nameEn: 'Moonlit Firefly Courtyard',
-    subtitleZh: '清冷月色与流萤微光',
-    bgHex: 0x070c18,
-    fogHex: 0x0b1224,
-    ambientHex: 0x4f6d90,
-    groundHex: 0x0a1122,
-    keyLightHex: 0xe6fcfd,
-    rimLightHex: 0x5bc0be,
-    fillLightHex: 0x72efdd,
-    particleHex: 0x80ffdb,
-    accentCss: '#64dfdf',
-  },
-  {
-    id: 'golden-solarium',
-    nameZh: '落日暖房',
-    nameEn: 'Amber Dusk Conservatory',
-    subtitleZh: '琥珀暮光与逆光金尘',
-    bgHex: 0x140b0d,
-    fogHex: 0x1c1013,
-    ambientHex: 0x885c60,
-    groundHex: 0x1a0f12,
-    keyLightHex: 0xffdcb0,
-    rimLightHex: 0xff758f,
-    fillLightHex: 0xf4a261,
-    particleHex: 0xffb703,
-    accentCss: '#ffb703',
-  },
-  {
-    id: 'botanical-atelier',
-    nameZh: '翡翠植物志',
-    nameEn: 'Emerald Herbarium Studio',
-    subtitleZh: '博物馆级林间散射光',
-    bgHex: 0x08120e,
-    fogHex: 0x0d1b16,
-    ambientHex: 0x568a75,
-    groundHex: 0x0c1814,
-    keyLightHex: 0xf8f9fa,
-    rimLightHex: 0x80ed99,
-    fillLightHex: 0x52b788,
-    particleHex: 0xb7e4c7,
-    accentCss: '#74c69d',
+    id: 'warm-living-room',
+    nameZh: '白透温馨客厅',
+    nameEn: 'Sunlit Warm Living Room',
+    subtitleZh: '落地白纱窗暖阳与奶白亚麻客厅远景，近景花朵主次分明',
+    bgHex: 0xffefd4,
+    fogHex: 0xf6dec0,
+    ambientHex: 0xffe8c8,
+    groundHex: 0xf2d8b6,
+    keyLightHex: 0xffebc6,
+    rimLightHex: 0xffc67d,
+    fillLightHex: 0xffdeb2,
+    particleHex: 0xd98a2b,
+    accentCss: '#d97706',
   },
 ];
 
@@ -1867,7 +1837,7 @@ export function computeFloralShellEnvelope(
     : [0.15, 0.38];
   const petalOpenPitchRange: [number, number] = isSunflower
     ? [spec.maxOpenAngleRad * 0.9, spec.maxOpenAngleRad * 1.05]
-    : [0.54, spec.maxOpenAngleRad];
+    : [0.68, spec.maxOpenAngleRad];
 
   const sepalRadius = petalMaxRadius + 0.009;
   const sepalY = 0.004;
@@ -2275,5 +2245,286 @@ export function evaluateGaussianSplatKernel2D(
   const alpha = clamp(baseOpacity * Math.exp(power), 0, 0.99);
   return alpha < 1.0 / 255.0 ? 0 : alpha;
 }
+
+export interface BloomForceFieldState {
+  interactionSpeed01: number;
+  viscousDragFactor: number;
+  centripetalStiffness: number;
+  splatKineticCompression: number;
+  maxParticleSpeed: number;
+  maxRadialEnvelope: number;
+  isHighSpeedDampingActive: boolean;
+  dampingStatusZh: string;
+}
+
+/**
+ * Computes the Force-Field Damping parameters for bloom particles and 3DGS splats
+ * as a function of current bloom aperture `bloom01` in [0, 1], bloom rate of change
+ * `bloomVelocity01PerSec` (1/s), 3-axis angular velocity `angularSpeedRadPerSec` (rad/s),
+ * and gesture burst intensity.
+ *
+ * Prevents particle splashing or 3DGS overflow at high interaction speeds via:
+ *   1. Non-linear velocity-dependent viscous drag (`viscousDragFactor`)
+ *   2. Adaptive centripetal containment stiffness (`centripetalStiffness`)
+ *   3. 3DGS covariance kinetic compression (`splatKineticCompression`)
+ *   4. Strict radial containment boundary (`maxRadialEnvelope`)
+ */
+export function computeBloomForceFieldDamping(
+  bloom01: number,
+  bloomVelocity01PerSec: number,
+  angularSpeedRadPerSec = 0,
+  burstIntensity = 0,
+): BloomForceFieldState {
+  const b = clamp(bloom01, 0, 1);
+  const absBloomVel = Math.abs(bloomVelocity01PerSec);
+  const absAngVel = Math.abs(angularSpeedRadPerSec);
+
+  // Normalized composite interaction speed in [0, 1] via smooth tanh saturation
+  const rawInteractionEnergy =
+    absBloomVel * 0.85 + absAngVel * 0.28 + clamp(burstIntensity, 0, 1) * 0.45;
+  const interactionSpeed01 = clamp(Math.tanh(rawInteractionEnergy * 0.92), 0, 1);
+
+  // Viscous drag increases sharply with interaction speed to absorb excess kinetic energy
+  const viscousDragRate = 2.8 + interactionSpeed01 * 11.5 + interactionSpeed01 * interactionSpeed01 * 8.0;
+  const viscousDragFactor = clamp(Math.exp(-viscousDragRate * (1 / 60)), 0.18, 0.96);
+
+  // Centripetal restoring stiffness tightens the force-field wall during rapid hand gestures
+  const centripetalStiffness = 4.2 + interactionSpeed01 * 14.8;
+
+  // 3DGS splat covariance compression: tightens splats by up to 18% during rapid motion to prevent halo splash
+  const splatKineticCompression = clamp(1.0 - interactionSpeed01 * 0.18, 0.82, 1.0);
+
+  // Strict speed governor (m/s) and radial containment envelope (m)
+  const maxParticleSpeed = 0.045 + b * 0.045 + (1 - interactionSpeed01) * 0.025;
+  const maxRadialEnvelope = 0.036 + b * 0.078;
+
+  const isHighSpeedDampingActive = interactionSpeed01 >= 0.28;
+  const dampingStatusZh = isHighSpeedDampingActive
+    ? `力场强阻尼抑制飞溅 (${Math.round(interactionSpeed01 * 100)}%)`
+    : '力场层流稳态 · 零溢出';
+
+  return {
+    interactionSpeed01,
+    viscousDragFactor,
+    centripetalStiffness,
+    splatKineticCompression,
+    maxParticleSpeed,
+    maxRadialEnvelope,
+    isHighSpeedDampingActive,
+    dampingStatusZh,
+  };
+}
+
+export interface ForceFieldParticleState {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+}
+
+/**
+ * Advances a 3D bloom particle inside a cylindrical/toroidal botanical containment force field
+ * centered at `(centerX, centerY, centerZ)`.
+ * Guarantees that even under extreme velocity impulses or rapid 0% <-> 100% scrubbing,
+ * the particle decelerates smoothly and NEVER splashes outside `maxRadius` or `[minY, maxY]`.
+ */
+export function stepForceFieldDampedParticle(
+  state: ForceFieldParticleState,
+  options: {
+    centerX?: number;
+    centerY?: number;
+    centerZ?: number;
+    targetOrbitRadius: number;
+    maxRadius: number;
+    minY: number;
+    maxY: number;
+    swirlSpeed: number;
+    updraftSpeed: number;
+    phase: number;
+    elapsedSec: number;
+    dt: number;
+    damping: BloomForceFieldState;
+  },
+): ForceFieldParticleState {
+  const cx = options.centerX ?? 0;
+  const cy = options.centerY ?? 0;
+  const cz = options.centerZ ?? 0;
+  const safeDt = clamp(options.dt, 0.001, 0.05);
+  const d = options.damping;
+
+  const dx = state.x - cx;
+  const dz = state.z - cz;
+  const r = Math.hypot(dx, dz);
+  const ux = r > 1e-5 ? dx / r : Math.cos(options.phase);
+  const uz = r > 1e-5 ? dz / r : Math.sin(options.phase);
+
+  // Tangential unit vector (-uz, ux) for smooth vortex circulation around the flower heart
+  const tx = -uz;
+  const tz = ux;
+
+  // 1. Radial harmonic spring toward targetOrbitRadius + nonlinear cubic soft-wall barrier near maxRadius
+  const radialError = r - options.targetOrbitRadius;
+  const softWallStart = options.maxRadius * 0.78;
+  const wallPenetration = Math.max(0, r - softWallStart);
+  const normalizedPen = wallPenetration / Math.max(0.005, options.maxRadius - softWallStart);
+  const cubicWallForce = normalizedPen * normalizedPen * normalizedPen * 1.85;
+
+  const radialAccel =
+    -d.centripetalStiffness * radialError -
+    d.centripetalStiffness * cubicWallForce;
+
+  // 2. Tangential vortex swirl (damped at high interaction speeds so particles don't centrifuge outward)
+  const swirlSuppression = 1.0 - d.interactionSpeed01 * 0.55;
+  const tangentialSpeed = options.swirlSpeed * swirlSuppression;
+
+  // 3. Vertical buoyancy updraft + soft ceiling/floor containment spring
+  const ySpan = Math.max(0.02, options.maxY - options.minY);
+  const yNorm = (state.y - options.minY) / ySpan;
+  let verticalAccel = (options.updraftSpeed * swirlSuppression - state.vy) * 4.5;
+  if (yNorm > 0.82) {
+    // Gentle recirculation pull downward near the upper canopy ceiling
+    verticalAccel -= ((yNorm - 0.82) / 0.18) * d.centripetalStiffness * 0.45;
+  } else if (yNorm < 0.12) {
+    verticalAccel += ((0.12 - yNorm) / 0.12) * d.centripetalStiffness * 0.45;
+  }
+
+  let vx =
+    state.vx +
+    (ux * radialAccel + (tx * tangentialSpeed - state.vx) * 3.8) * safeDt;
+  let vy = state.vy + verticalAccel * safeDt;
+  let vz =
+    state.vz +
+    (uz * radialAccel + (tz * tangentialSpeed - state.vz) * 3.8) * safeDt;
+
+  // 4. Frame-rate independent non-linear viscous force-field drag
+  const frameDrag = Math.pow(d.viscousDragFactor, safeDt * 60);
+  vx *= frameDrag;
+  vy *= frameDrag;
+  vz *= frameDrag;
+
+  // 5. Soft hyperbolic-tangent (`tanh`) velocity governor: prevents any velocity spike from splashing
+  const speed = Math.hypot(vx, vy, vz);
+  if (speed > 1e-5) {
+    const cappedSpeed =
+      d.maxParticleSpeed * Math.tanh(speed / Math.max(1e-4, d.maxParticleSpeed));
+    const scale = cappedSpeed / speed;
+    vx *= scale;
+    vy *= scale;
+    vz *= scale;
+  }
+
+  let nextX = state.x + vx * safeDt;
+  let nextY = state.y + vy * safeDt;
+  let nextZ = state.z + vz * safeDt;
+
+  // 6. Strict radial & vertical boundary reflection/containment (zero overflow guarantee)
+  const nextDx = nextX - cx;
+  const nextDz = nextZ - cz;
+  const nextR = Math.hypot(nextDx, nextDz);
+  if (nextR > options.maxRadius) {
+    const clampedR = options.maxRadius * (0.96 - 0.04 * Math.sin(options.elapsedSec + options.phase));
+    const invR = clampedR / nextR;
+    nextX = cx + nextDx * invR;
+    nextZ = cz + nextDz * invR;
+    // Damp outward radial velocity component
+    const outDot = (vx * nextDx + vz * nextDz) / nextR;
+    if (outDot > 0) {
+      vx -= (nextDx / nextR) * outDot * 1.25;
+      vz -= (nextDz / nextR) * outDot * 1.25;
+    }
+  }
+
+  if (nextY > options.maxY) {
+    // Seamless toroidal recirculation back to the nectar chalice base instead of popping out the top
+    const respawnR = options.targetOrbitRadius * (0.65 + 0.25 * Math.sin(options.phase * 3.1));
+    const respawnAng = options.phase + options.elapsedSec * 0.35;
+    nextX = cx + Math.cos(respawnAng) * respawnR;
+    nextY = cy + options.minY + ySpan * 0.08;
+    nextZ = cz + Math.sin(respawnAng) * respawnR;
+    vx *= 0.25;
+    vy = Math.abs(vy) * 0.35;
+    vz *= 0.25;
+  } else if (nextY < cy + options.minY) {
+    nextY = cy + options.minY;
+    if (vy < 0) vy = -vy * 0.3;
+  }
+
+  return {x: nextX, y: nextY, z: nextZ, vx, vy, vz};
+}
+
+export interface DetailedBloomStageInfo {
+  stageIndex: number; // 0..4
+  stageNameZh: string;
+  stageNameEn: string;
+  stageDetailZh: string;
+  tipUncurlFactor: number; // -0.35 (infolded bud tip) .. +1.0 (full reflexed tip)
+  marginRuffleExpansion: number; // 0.22 .. 1.0
+  venationTranslucencyBoost: number; // 0.0 .. 1.0
+  antherDehiscenceGlow: number; // 0.0 .. 1.0
+  dewdropSlideProgress: number; // 0.0 .. 1.0
+}
+
+/**
+ * Evaluates multi-stage botanical blooming details (5-stage anthesis progression,
+ * petal tip uncurling, marginal ruffle expansion, anther dehiscence glow, and dewdrop glide)
+ * so the flower blooming animation exhibits rich, lifelike micro-details from 0% to 100%.
+ */
+export function evaluateDetailedBloomKinematics(
+  bloom01: number,
+  bloomVelocity01PerSec = 0,
+): DetailedBloomStageInfo {
+  const b = clamp(bloom01, 0, 1);
+  const velDamp = clamp(1.0 - Math.abs(bloomVelocity01PerSec) * 0.12, 0.72, 1.0);
+
+  let stageIndex = 0;
+  let stageNameZh = '含苞待放';
+  let stageNameEn = 'Tight Imbricate Bud';
+  let stageDetailZh = '萼片紧抱 · 瓣尖内敛成苞';
+
+  if (b >= 0.86) {
+    stageIndex = 4;
+    stageNameZh = '倾城满开';
+    stageNameEn = 'Full Anthesis';
+    stageDetailZh = '花冠全舒 · 药室授粉微旋 · 晨露滑落';
+  } else if (b >= 0.62) {
+    stageIndex = 3;
+    stageNameZh = '金蕊吐芳';
+    stageNameEn = 'Stamen Anthesis';
+    stageDetailZh = '内瓣盛开 · 斐波那契花丝渐次展露';
+  } else if (b >= 0.36) {
+    stageIndex = 2;
+    stageNameZh = '玉瓣半舒';
+    stageNameEn = 'Whorl Unfurling';
+    stageDetailZh = '外中轮花瓣层叠旋开 · 维管束透光增强';
+  } else if (b >= 0.15) {
+    stageIndex = 1;
+    stageNameZh = '萼片初启';
+    stageNameEn = 'Calyx Unclasping';
+    stageDetailZh = '翠萼先行托举 · 外层护瓣微启';
+  }
+
+  // Smooth S-curve transition from inward-curled bud apex (-0.35) to outward-reflexed bloom (+1.0)
+  const smoothB = b * b * (3 - 2 * b);
+  const tipUncurlFactor = clamp((-0.35 + 1.35 * Math.pow(smoothB, 1.15)) * velDamp, -0.35, 1.0);
+  const marginRuffleExpansion = clamp(0.22 + 0.78 * Math.pow(b, 1.25) * velDamp, 0.22, 1.0);
+  const venationTranslucencyBoost = clamp(Math.pow(b, 0.85), 0, 1);
+  const antherDehiscenceGlow = clamp((b - 0.42) / 0.58, 0, 1);
+  const dewdropSlideProgress = clamp((b - 0.12) / 0.88, 0, 1);
+
+  return {
+    stageIndex,
+    stageNameZh,
+    stageNameEn,
+    stageDetailZh,
+    tipUncurlFactor,
+    marginRuffleExpansion,
+    venationTranslucencyBoost,
+    antherDehiscenceGlow,
+    dewdropSlideProgress,
+  };
+}
+
 
 

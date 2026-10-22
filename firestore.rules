@@ -111,7 +111,7 @@ service cloud.firestore {
 
     // Collection 1: Public User Profile (/users/{userId})
     match /users/{userId} {
-      allow get: if isOwner(userId) && isValidId(userId) && existing().uid == request.auth.uid;
+      allow get: if isOwner(userId) && isValidId(userId) && (resource == null || existing().uid == request.auth.uid);
       allow list: if false;
       allow create: if isVerifiedOwner(userId) &&
         isValidId(userId) &&
@@ -130,7 +130,7 @@ service cloud.firestore {
         allow get: if isVerifiedOwner(userId) &&
           isValidId(userId) &&
           isValidId(infoId) &&
-          existing().uid == request.auth.uid &&
+          (resource == null || existing().uid == request.auth.uid) &&
           hasActiveParentUser(userId);
         allow list: if false;
         allow create: if isVerifiedOwner(userId) &&
@@ -157,7 +157,7 @@ service cloud.firestore {
         allow get: if isOwner(userId) &&
           isValidId(userId) &&
           isValidId(presetId) &&
-          existing().ownerId == request.auth.uid &&
+          (resource == null || existing().ownerId == request.auth.uid) &&
           hasActiveParentUser(userId);
 
         // Pillar 8: Secure List Queries (No get()/exists() inside list; evaluates resource.data)

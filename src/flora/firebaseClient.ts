@@ -133,6 +133,8 @@ export function sanitizeText(raw: string, maxLen: number, fallback: string): str
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+const profileBootstrapInFlight = new Map<string, Promise<void>>();
+
 export async function ensureUserProfileBootstrapped(
   user: User,
   preferredSpeciesId = 'lotus',
@@ -141,21 +143,33 @@ export async function ensureUserProfileBootstrapped(
   const uid = sanitizeId(user.uid, MAX_ID_LENGTH);
   if (!BLUEPRINT_ID_PATTERN.test(uid)) return;
 
-  const userPath = `users/${uid}`;
-  const privatePath = `users/${uid}/private/profile`;
-  const userRef = doc(db, 'users', uid);
-  const privateRef = doc(db, 'users', uid, 'private', 'profile');
+  const existingPromise = profileBootstrapInFlight.get(uid);
+  if (existingPromise) {
+    return existingPromise;
+  }
 
-  try {
-    const existingSnap = await getDoc(userRef);
-    const displayName = sanitizeText(
-      user.displayName || user.email?.split('@')[0] || 'FLORA Botanist',
-      MAX_DISPLAY_NAME_LENGTH,
-      'FLORA Botanist',
-    );
-    const cleanSpeciesId = sanitizeId(preferredSpeciesId, MAX_SPECIES_ID_LENGTH);
+  const task = (async () => {
+    const userPath = `users/${uid}`;
+    const privatePath = `users/${uid}/private/profile`;
+    const userRef = doc(db, 'users', uid);
+    const privateRef = doc(db, 'users', uid, 'private', 'profile');
 
-    if (!existingSnap.exists()) {
+    try {
+      const existingSnap = await getDoc(userRef);
+      if (existingSnap.exists()) {
+        return;
+      }
+
+      const displayName = sanitizeText(
+        user.displayName || user.email?.split('@')[0] || 'FLORA Botanist',
+        MAX_DISPLAY_NAME_LENGTH,
+        'FLORA Botanist',
+      );
+      const cleanSpeciesId = sanitizeId(
+        preferredSpeciesId,
+        MAX_SPECIES_ID_LENGTH,
+      );
+
       const batch = writeBatch(db);
       batch.set(userRef, {
         uid,
@@ -173,16 +187,19 @@ export async function ensureUserProfileBootstrapped(
         });
       }
       await batch.commit();
-    } else {
-      await updateDoc(userRef, {
-        displayName,
-        preferredSpeciesId: cleanSpeciesId,
-        updatedAt: serverTimestamp(),
-      });
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.WRITE,
+        `${userPath} | ${privatePath}`,
+      );
+    } finally {
+      profileBootstrapInFlight.delete(uid);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `${userPath} | ${privatePath}`);
-  }
+  })();
+
+  profileBootstrapInFlight.set(uid, task);
+  return task;
 }
 
 export async function signInWithGooglePopup(): Promise<User | null> {
@@ -201,6 +218,11 @@ export function subscribeToAuthChanges(
   callback: (user: User | null) => void,
 ): Unsubscribe {
   return onAuthStateChanged(auth, (user) => {
+    if (user) {
+      void ensureUserProfileBootstrapped(user).catch((err) => {
+        console.warn('Profile bootstrap warning:', err);
+      });
+    }
     callback(user);
   });
 }
@@ -289,7 +311,11 @@ export async function saveBotanicalPresetToCloud(
   const cleanEnvId = sanitizeId(input.environmentId, MAX_SPECIES_ID_LENGTH);
   const cleanBloom = Math.round(clamp(input.bloomPct, 0, 100));
   const cleanPitch = Number(clamp(input.pitchRad, -1.6, 1.6).toFixed(4));
-  const cleanYaw = Number(clamp(input.yawRad, -6.5, 6.5).toFixed(4));
+  const wrappedYaw =
+    ((((input.yawRad + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) %
+      (2 * Math.PI)) -
+    Math.PI;
+  const cleanYaw = Number(clamp(wrappedYaw, -6.5, 6.5).toFixed(4));
   const cleanRoll = Number(clamp(input.rollRad, -1.6, 1.6).toFixed(4));
   const cleanMode: GaussianSplatMode =
     input.gaussianSplatMode === 'pure-3dgs' ||

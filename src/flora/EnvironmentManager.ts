@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import {
   ENVIRONMENT_LIBRARY,
   type EnvironmentSpec,
+  type ForceFieldParticleState,
+  type BloomForceFieldState,
+  computeBloomForceFieldDamping,
+  stepForceFieldDampedParticle,
   clamp,
 } from './gestureMath';
 
@@ -18,6 +22,8 @@ export class EnvironmentManager extends THREE.Group {
 
   private sanctuaryDomeMat!: THREE.ShaderMaterial;
   private pedestalGroup: THREE.Group;
+  private livingRoomGroup: THREE.Group;
+  private coffeeTableGroup: THREE.Group;
   private waterDiscMat!: THREE.MeshPhysicalMaterial;
   private goldTrimMat!: THREE.MeshPhysicalMaterial;
   private rippleRings: THREE.Mesh[] = [];
@@ -30,6 +36,9 @@ export class EnvironmentManager extends THREE.Group {
   private particlePositions: Float32Array;
   private particleVelocities: Float32Array;
   private particlePhases: Float32Array;
+  private particleStates: ForceFieldParticleState[] = [];
+  private lastForceFieldState: BloomForceFieldState =
+    computeBloomForceFieldDamping(0.78, 0, 0, 0);
   private burstIntensity = 0;
   private lowNoiseMode = true;
 
@@ -56,11 +65,11 @@ export class EnvironmentManager extends THREE.Group {
     super();
     this.name = 'BotanicalEnvironmentManager';
 
-    // 1. UE5 Sky Atmosphere Hemisphere GI Fill (calibrated for rich petal pigment & vein contrast)
+    // 1. Calibrated Sky/Studio Hemisphere GI Fill (preserves deep petal pigment & vein contrast on white backdrops)
     this.hemiLight = new THREE.HemisphereLight(
       this.currentSpec.ambientHex,
       this.currentSpec.groundHex,
-      0.38,
+      0.34,
     );
     this.hemiLight.position.set(0, 3.5, -1.08);
     this.add(this.hemiLight);
@@ -69,20 +78,23 @@ export class EnvironmentManager extends THREE.Group {
       typeof navigator !== 'undefined' &&
       (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
 
-    // 2. UE5 Key Sun / Softbox Directional Light with Contact-Hardened Shadow Frustum
+    // 2. Key Sun / Window Directional Light with Contact-Hardened Shadow Frustum
     this.keyLight = new THREE.DirectionalLight(
       this.currentSpec.keyLightHex,
-      0.88,
+      0.84,
     );
     this.keyLight.position.set(1.45, 2.75, 0.45);
     this.keyLight.castShadow = !isHeadless;
-    this.keyLight.shadow.mapSize.set(isHeadless ? 512 : 2048, isHeadless ? 512 : 2048);
+    this.keyLight.shadow.mapSize.set(
+      isHeadless ? 512 : 2048,
+      isHeadless ? 512 : 2048,
+    );
     this.keyLight.shadow.camera.near = 0.5;
     this.keyLight.shadow.camera.far = 4.5;
-    this.keyLight.shadow.camera.left = -0.58;
-    this.keyLight.shadow.camera.right = 0.58;
-    this.keyLight.shadow.camera.top = 0.58;
-    this.keyLight.shadow.camera.bottom = -0.58;
+    this.keyLight.shadow.camera.left = -0.65;
+    this.keyLight.shadow.camera.right = 0.65;
+    this.keyLight.shadow.camera.top = 0.65;
+    this.keyLight.shadow.camera.bottom = -0.65;
     this.keyLight.shadow.bias = -0.0002;
     this.keyLight.shadow.normalBias = 0.006;
     this.keyLight.shadow.radius = 2.5;
@@ -93,10 +105,10 @@ export class EnvironmentManager extends THREE.Group {
     this.keyLight.target = this.keyLightTarget;
     this.add(this.keyLight);
 
-    // 3. UE5 Subsurface Back-Rim Light (excites Two-Sided Foliage SSS translucency without blowout)
+    // 3. Subsurface Back-Rim Light (excites Two-Sided Foliage SSS translucency without blowout)
     this.rimLight = new THREE.DirectionalLight(
       this.currentSpec.rimLightHex,
-      0.62,
+      0.56,
     );
     this.rimLight.position.set(-1.55, 2.15, -2.35);
     this.rimLight.target = this.keyLightTarget;
@@ -105,17 +117,17 @@ export class EnvironmentManager extends THREE.Group {
     // 4. Lateral Fill Light (gentle shadow lift, preserves deep petal fold contrast)
     this.fillLight = new THREE.PointLight(
       this.currentSpec.fillLightHex,
-      0.32,
+      0.28,
       4.5,
       1.5,
     );
     this.fillLight.position.set(-0.92, 1.42, -0.32);
     this.add(this.fillLight);
 
-    // 5. Lumen Ground/Water Bounce Uplight (illuminates abaxial lower petals & sepals)
+    // 5. Porcelain/Table Bounce Uplight (illuminates abaxial lower petals & sepals)
     this.bounceLight = new THREE.PointLight(
       this.currentSpec.particleHex,
-      0.24,
+      0.22,
       2.2,
       1.6,
     );
@@ -129,7 +141,19 @@ export class EnvironmentManager extends THREE.Group {
     this.pedestalGroup.position.set(0, 0.68, -1.08);
     this.pedestalGroup.xb = {pointerEvents: 'none'};
     this.add(this.pedestalGroup);
+
+    this.coffeeTableGroup = new THREE.Group();
+    this.pedestalGroup.add(this.coffeeTableGroup);
+
+    this.livingRoomGroup = new THREE.Group();
+    this.livingRoomGroup.name = 'WarmSunlitLivingRoomBackdrop';
+    this.livingRoomGroup.xb = {pointerEvents: 'none'};
+    this.livingRoomGroup.visible =
+      this.currentSpec.id === 'warm-living-room';
+    this.add(this.livingRoomGroup);
+
     this.buildPedestalAndRipples();
+    this.buildWarmSunlitLivingRoom();
 
     this.particlePositions = new Float32Array(PARTICLE_COUNT * 3);
     this.particleVelocities = new Float32Array(PARTICLE_COUNT * 3);
@@ -152,11 +176,12 @@ export class EnvironmentManager extends THREE.Group {
   }
 
   private buildSanctuaryAtmosphere(): void {
-    // UE5 Sky Atmosphere Horizon-to-Zenith Gradient Dome Shader with IGN Dithering (zero 8-bit banding)
-    const domeGeo = new THREE.SphereGeometry(4.4, 48, 32);
+    // Luminous Warm-White & Creamy Golden-Ivory Studio Dome (具有一定饱和度的暖白色)
+    const domeGeo = new THREE.SphereGeometry(4.6, 48, 32);
     this.sanctuaryDomeMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
+      toneMapped: false,
       uniforms: {
         uZenithColor: {value: new THREE.Color(this.currentSpec.bgHex)},
         uHorizonColor: {value: new THREE.Color(this.currentSpec.fogHex)},
@@ -177,14 +202,23 @@ export class EnvironmentManager extends THREE.Group {
         void main() {
           vec3 dir = normalize(vWorldOffset);
           float elev = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-          float horizonBand = exp(-abs(dir.y) * 3.2);
-          vec3 skyCol = mix(uHorizonColor, uZenithColor, smoothstep(0.12, 0.92, elev));
-          float sunSide = max(0.0, dot(dir, normalize(vec3(0.45, 0.35, -0.5))));
-          skyCol += uGlowColor * pow(sunSide, 4.0) * 0.06 + uGlowColor * horizonBand * 0.03;
-          // Screen-space Interleaved Gradient Noise (IGN) dithering eliminates 8-bit Mach bands
+          // Convert linear uniform colors back to sRGB and enrich with warm golden-cream saturation
+          vec3 zenithSrgb = pow(clamp(uZenithColor, 0.0, 1.0), vec3(1.0 / 2.2));
+          vec3 horizonSrgb = pow(clamp(uHorizonColor, 0.0, 1.0), vec3(1.0 / 2.2));
+          vec3 glowSrgb = pow(clamp(uGlowColor, 0.0, 1.0), vec3(1.0 / 2.2));
+          // Moderately saturated warm-white gradient from creamy golden-ivory horizon to sunlit warm-cream zenith
+          vec3 baseCol = mix(horizonSrgb, zenithSrgb, smoothstep(0.12, 0.86, elev));
+          float centerFocus = max(0.0, dot(dir, normalize(vec3(0.0, 0.08, -1.0))));
+          float windowGlow = max(0.0, dot(dir, normalize(vec3(-0.48, 0.36, -0.78))));
+          // Warm cream halo behind the hero flower + warm golden-ivory contour
+          vec3 warmCreamHalo = vec3(1.0, 0.955, 0.86);
+          vec3 skyCol = mix(baseCol, warmCreamHalo, 0.38 * pow(centerFocus, 2.0)) + glowSrgb * pow(windowGlow, 3.5) * 0.045;
+          // Rich warm buttercream peripheral framing so the warm-white saturation is unmistakable
+          vec3 warmEdgeTint = vec3(0.968, 0.872, 0.728);
+          skyCol = mix(warmEdgeTint, skyCol, 0.48 + 0.52 * pow(centerFocus, 1.15));
           float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-          skyCol += (ign - 0.5) * (2.2 / 255.0);
-          gl_FragColor = vec4(max(skyCol, vec3(0.0)), 1.0);
+          skyCol += (ign - 0.5) * (1.8 / 255.0);
+          gl_FragColor = vec4(clamp(skyCol, 0.0, 1.0), 1.0);
         }
       `,
     });
@@ -246,12 +280,15 @@ export class EnvironmentManager extends THREE.Group {
     if (!this.pmremGenerator || !this.sceneRef) return;
 
     const lumenScene = new THREE.Scene();
-    lumenScene.background = new THREE.Color(spec.bgHex);
+    // Use a balanced studio reflection base so PBR specular highlights stay crisp without washing out petals
+    lumenScene.background = new THREE.Color(0x28262e).lerp(
+      new THREE.Color(spec.ambientHex),
+      0.18,
+    );
 
-    // Calibrated HDR softbox panels for natural studio reflections without washing out petal veins
     const keyPanelGeo = new THREE.PlaneGeometry(4.2, 4.2);
     const keyPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.keyLightHex).multiplyScalar(0.95),
+      color: new THREE.Color(spec.keyLightHex).multiplyScalar(0.92),
       side: THREE.DoubleSide,
     });
     const keyPanel = new THREE.Mesh(keyPanelGeo, keyPanelMat);
@@ -260,7 +297,7 @@ export class EnvironmentManager extends THREE.Group {
     lumenScene.add(keyPanel);
 
     const rimPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.rimLightHex).multiplyScalar(0.85),
+      color: new THREE.Color(spec.rimLightHex).multiplyScalar(0.82),
       side: THREE.DoubleSide,
     });
     const rimPanel = new THREE.Mesh(keyPanelGeo, rimPanelMat);
@@ -269,7 +306,7 @@ export class EnvironmentManager extends THREE.Group {
     lumenScene.add(rimPanel);
 
     const fillPanelMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.fillLightHex).multiplyScalar(0.65),
+      color: new THREE.Color(spec.fillLightHex).multiplyScalar(0.62),
       side: THREE.DoubleSide,
     });
     const fillPanel = new THREE.Mesh(keyPanelGeo, fillPanelMat);
@@ -279,7 +316,7 @@ export class EnvironmentManager extends THREE.Group {
 
     const skylightGeo = new THREE.RingGeometry(1.2, 3.6, 32);
     const skylightMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(spec.ambientHex).multiplyScalar(0.75),
+      color: new THREE.Color(spec.ambientHex).multiplyScalar(0.72),
       side: THREE.DoubleSide,
     });
     const skylight = new THREE.Mesh(skylightGeo, skylightMat);
@@ -293,8 +330,9 @@ export class EnvironmentManager extends THREE.Group {
     this.envRenderTarget = this.pmremGenerator.fromScene(lumenScene, 0.04);
     this.sceneRef.environment = this.envRenderTarget.texture;
     if ('environmentIntensity' in this.sceneRef) {
-      (this.sceneRef as THREE.Scene & {environmentIntensity: number}).environmentIntensity =
-        0.34;
+      (
+        this.sceneRef as THREE.Scene & {environmentIntensity: number}
+      ).environmentIntensity = 0.28;
     }
 
     keyPanelGeo.dispose();
@@ -327,45 +365,117 @@ export class EnvironmentManager extends THREE.Group {
       this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
 
       scene.background = this.currentBgColor;
-      scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.095);
+      scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.068);
     } catch (e) {
       console.warn('Studio PMREM setup fallback:', e);
     }
+  }
+
+  private createRadialContactShadowTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const grad = ctx.createRadialGradient(64, 64, 8, 64, 64, 62);
+      grad.addColorStop(0, 'rgba(92, 68, 42, 0.28)');
+      grad.addColorStop(0.55, 'rgba(128, 96, 62, 0.12)');
+      grad.addColorStop(1, 'rgba(165, 132, 92, 0.0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 128, 128);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  private createFeatheredSunbeamTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, 128, 128);
+      // Horizontal feathering across beam width
+      const hGrad = ctx.createLinearGradient(0, 0, 128, 0);
+      hGrad.addColorStop(0, 'rgba(255, 246, 224, 0.0)');
+      hGrad.addColorStop(0.25, 'rgba(255, 246, 224, 0.65)');
+      hGrad.addColorStop(0.5, 'rgba(255, 250, 236, 1.0)');
+      hGrad.addColorStop(0.75, 'rgba(255, 246, 224, 0.65)');
+      hGrad.addColorStop(1, 'rgba(255, 246, 224, 0.0)');
+      ctx.fillStyle = hGrad;
+      ctx.fillRect(0, 0, 128, 128);
+
+      // Vertical attenuation along beam length
+      ctx.globalCompositeOperation = 'destination-in';
+      const vGrad = ctx.createLinearGradient(0, 0, 0, 128);
+      vGrad.addColorStop(0, 'rgba(255, 255, 255, 0.0)');
+      vGrad.addColorStop(0.18, 'rgba(255, 255, 255, 0.95)');
+      vGrad.addColorStop(0.75, 'rgba(255, 255, 255, 0.55)');
+      vGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+      ctx.fillStyle = vGrad;
+      ctx.fillRect(0, 0, 128, 128);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
   }
 
   private buildPedestalAndRipples(): void {
     const isHeadless =
       typeof navigator !== 'undefined' &&
       (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
-    // Stepped UE5 Architectural Obsidian Sanctuary Basin
+
+    // Soft Radial Contact Shadow under the Porcelain Basin so the foreground hero is grounded
+    const shadowTex = this.createRadialContactShadowTexture();
+    const shadowPlaneGeo = new THREE.PlaneGeometry(1.05, 1.05);
+    shadowPlaneGeo.rotateX(-Math.PI / 2);
+    const shadowPlaneMat = new THREE.MeshBasicMaterial({
+      map: shadowTex,
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    });
+    const shadowPlane = new THREE.Mesh(shadowPlaneGeo, shadowPlaneMat);
+    shadowPlane.position.y = -0.044;
+    this.pedestalGroup.add(shadowPlane);
+
+    // Sculpted Warm-White Mutton-Fat Jade Porcelain Ikebana Basin (暖白羊脂玉瓷花器)
     const basinProfile = [
-      new THREE.Vector2(0.0, -0.045),
-      new THREE.Vector2(0.36, -0.045),
-      new THREE.Vector2(0.41, -0.018),
-      new THREE.Vector2(0.43, 0.006),
-      new THREE.Vector2(0.405, 0.014),
-      new THREE.Vector2(0.388, 0.002),
+      new THREE.Vector2(0.0, -0.044),
+      new THREE.Vector2(0.35, -0.044),
+      new THREE.Vector2(0.405, -0.016),
+      new THREE.Vector2(0.425, 0.008),
+      new THREE.Vector2(0.402, 0.015),
+      new THREE.Vector2(0.386, 0.002),
       new THREE.Vector2(0.0, 0.002),
     ];
     const basinGeo = new THREE.LatheGeometry(basinProfile, 64);
     const basinMat = new THREE.MeshPhysicalMaterial({
-      color: 0x12131a,
-      roughness: 0.24,
-      metalness: 0.18,
-      clearcoat: 0.6,
-      clearcoatRoughness: 0.22,
+      color: 0xfff5e4,
+      emissive: new THREE.Color(0xfce6c4),
+      emissiveIntensity: 0.34,
+      roughness: 0.18,
+      metalness: 0.04,
+      clearcoat: 0.85,
+      clearcoatRoughness: 0.14,
+      sheen: 0.35,
+      sheenColor: new THREE.Color('#fff9ee'),
     });
     const basinMesh = new THREE.Mesh(basinGeo, basinMat);
     basinMesh.receiveShadow = true;
     this.pedestalGroup.add(basinMesh);
 
-    // Mirror-like Sanctuary Water Surface
-    const waterGeo = new THREE.CylinderGeometry(0.388, 0.388, 0.008, 64);
+    // Translucent Crystal Water Surface inside the Porcelain Basin
+    const waterGeo = new THREE.CylinderGeometry(0.386, 0.386, 0.008, 64);
     this.waterDiscMat = new THREE.MeshPhysicalMaterial({
       color: this.currentSpec.groundHex,
-      roughness: 0.05,
-      metalness: 0.12,
-      transmission: isHeadless ? 0.0 : 0.25,
+      emissive: new THREE.Color(0xfbe5c4),
+      emissiveIntensity: 0.28,
+      roughness: 0.06,
+      metalness: 0.06,
+      transmission: isHeadless ? 0.0 : 0.28,
       ior: 1.333,
       clearcoat: 1.0,
       clearcoatRoughness: 0.04,
@@ -377,14 +487,14 @@ export class EnvironmentManager extends THREE.Group {
     waterDisc.receiveShadow = true;
     this.pedestalGroup.add(waterDisc);
 
-    // Brushed Champagne-Gold Architectural Rim & Central Ikebana Kenzan Holder (花道剑山底座，包裹花梗底端防悬空)
+    // Brushed Champagne-Gold Rim & Central Ikebana Kenzan Holder (花道剑山底座)
     this.goldTrimMat = new THREE.MeshPhysicalMaterial({
       color: 0xd4af37,
       roughness: 0.24,
-      metalness: 0.86,
+      metalness: 0.84,
       clearcoat: 0.5,
     });
-    const outerRimGeo = new THREE.TorusGeometry(0.408, 0.0038, 16, 72);
+    const outerRimGeo = new THREE.TorusGeometry(0.406, 0.0036, 16, 72);
     outerRimGeo.rotateX(Math.PI / 2);
     const outerRimMesh = new THREE.Mesh(outerRimGeo, this.goldTrimMat);
     outerRimMesh.position.y = 0.012;
@@ -395,20 +505,20 @@ export class EnvironmentManager extends THREE.Group {
     kenzanMesh.position.set(0, 0.01, 0);
     this.pedestalGroup.add(kenzanMesh);
 
-    // Floating Notched Botanical Waterlily Pads resting horizontally on the water mirror surface
+    // Subtle Celadon-Jade Floating Botanical Leaves on the Water Mirror
     const padMat = new THREE.MeshPhysicalMaterial({
-      color: 0x265c42,
-      roughness: 0.36,
+      color: 0x5c8d73,
+      roughness: 0.38,
       metalness: 0.02,
-      clearcoat: 0.45,
+      clearcoat: 0.42,
       clearcoatRoughness: 0.25,
-      sheen: 0.4,
-      sheenColor: new THREE.Color('#74c69d'),
+      sheen: 0.35,
+      sheenColor: new THREE.Color('#b7e4c7'),
     });
     const padConfigs = [
-      {x: -0.18, z: 0.11, r: 0.095, rotY: 0.45},
-      {x: 0.17, z: -0.1, r: 0.082, rotY: -1.75},
-      {x: -0.12, z: -0.16, r: 0.068, rotY: 2.1},
+      {x: -0.18, z: 0.11, r: 0.088, rotY: 0.45},
+      {x: 0.17, z: -0.1, r: 0.076, rotY: -1.75},
+      {x: -0.12, z: -0.16, r: 0.062, rotY: 2.1},
     ];
     for (const cfg of padConfigs) {
       const padGeo = new THREE.CylinderGeometry(
@@ -435,7 +545,7 @@ export class EnvironmentManager extends THREE.Group {
       const mat = new THREE.MeshBasicMaterial({
         color: this.currentSpec.particleHex,
         transparent: true,
-        opacity: 0.16,
+        opacity: 0.18,
         side: THREE.DoubleSide,
       });
       const ring = new THREE.Mesh(ringGeo, mat);
@@ -443,6 +553,278 @@ export class EnvironmentManager extends THREE.Group {
       this.pedestalGroup.add(ring);
       this.rippleRings.push(ring);
     }
+  }
+
+  /**
+   * Builds the "Warm Translucent Living Room" (白透温馨客厅) 3D architectural environment
+   * with strict Primary-Secondary Visual Hierarchy (主次分明) and moderately saturated warm-white tones (具有一定饱和度的暖白色):
+   * - PRIMARY FOREGROUND (主 · 近景聚焦 z = -1.08): Sculpted warm travertine coffee table & porcelain vessel supporting the hero flower.
+   * - SECONDARY BACKGROUND (次 · 远景温馨客厅衬景 z = -2.35 .. -2.95): Full-width sunlit warm-cream wall (#fcecd2), floor-to-ceiling
+   *   translucent sheer window with feathered sunbeams on the left, minimalist warm oatmeal-linen sofa with cushions on the right,
+   *   and a subtle framed relief artwork—creating a luminous, cozy warm-white home living room while keeping 100% focus on the flower.
+   */
+  private buildWarmSunlitLivingRoom(): void {
+    // 1. FOREGROUND COFFEE TABLE TOP (主景承托: 暖白洞石与温润浅橡木茶几, y = -0.062 relative to pedestal at y = 0.68)
+    const tableTopGeo = new THREE.CylinderGeometry(0.66, 0.63, 0.034, 64);
+    const tableTopMat = new THREE.MeshPhysicalMaterial({
+      color: 0xfff3de,
+      emissive: new THREE.Color(0xf8e0bc),
+      emissiveIntensity: 0.48,
+      roughness: 0.38,
+      metalness: 0.02,
+      clearcoat: 0.28,
+      clearcoatRoughness: 0.35,
+    });
+    const tableTop = new THREE.Mesh(tableTopGeo, tableTopMat);
+    tableTop.position.set(0, -0.062, 0);
+    tableTop.receiveShadow = true;
+    this.coffeeTableGroup.add(tableTop);
+
+    const tableBaseGeo = new THREE.CylinderGeometry(0.24, 0.31, 0.42, 48);
+    const warmOakMat = new THREE.MeshStandardMaterial({
+      color: 0xe6caa4,
+      emissive: new THREE.Color(0xdcb888),
+      emissiveIntensity: 0.42,
+      roughness: 0.65,
+      metalness: 0.02,
+    });
+    const tableBase = new THREE.Mesh(tableBaseGeo, warmOakMat);
+    tableBase.position.set(0, -0.285, 0);
+    this.coffeeTableGroup.add(tableBase);
+    this.coffeeTableGroup.visible =
+      this.currentSpec.id === 'warm-living-room';
+
+    // 2. SECONDARY BACKGROUND LIVING ROOM ARCHITECTURE (次景远景衬托: 具有一定饱和度的暖白色 z = -2.35 .. -2.95)
+    const warmWallMat = new THREE.MeshStandardMaterial({
+      color: 0xffefd2,
+      emissive: new THREE.Color(0xfbe0b4),
+      emissiveIntensity: 0.84,
+      roughness: 0.9,
+      metalness: 0.0,
+    });
+    const wainscotMat = new THREE.MeshStandardMaterial({
+      color: 0xfbe5c2,
+      emissive: new THREE.Color(0xf4d6a4),
+      emissiveIntensity: 0.74,
+      roughness: 0.86,
+      metalness: 0.0,
+    });
+    const linenSofaMat = new THREE.MeshStandardMaterial({
+      color: 0xffeeda,
+      emissive: new THREE.Color(0xf7dbb4),
+      emissiveIntensity: 0.7,
+      roughness: 0.88,
+      metalness: 0.0,
+    });
+    const pillowWarmMat = new THREE.MeshStandardMaterial({
+      color: 0xf4dec0,
+      emissive: new THREE.Color(0xebd0aa),
+      emissiveIntensity: 0.56,
+      roughness: 0.84,
+      metalness: 0.0,
+    });
+    const pillowAccentMat = new THREE.MeshStandardMaterial({
+      color: 0xe8c9a4,
+      emissive: new THREE.Color(0xdfb98c),
+      emissiveIntensity: 0.5,
+      roughness: 0.84,
+      metalness: 0.0,
+    });
+    const sheerCurtainMat = new THREE.MeshBasicMaterial({
+      color: 0xfff9ee,
+      transparent: true,
+      opacity: 0.68,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+    const sunlitWindowGlassMat = new THREE.MeshBasicMaterial({
+      color: 0xfffdf6,
+      toneMapped: false,
+    });
+
+    // Full-Width Back Living Room Wall & Subtle Dado Moulding (14m wide so no side edges ever clip)
+    const backWallGeo = new THREE.PlaneGeometry(14.0, 6.2);
+    const backWall = new THREE.Mesh(backWallGeo, warmWallMat);
+    backWall.position.set(0, 1.65, -2.96);
+    this.livingRoomGroup.add(backWall);
+
+    const dadoRailGeo = new THREE.BoxGeometry(14.0, 0.028, 0.03);
+    const dadoRail = new THREE.Mesh(dadoRailGeo, wainscotMat);
+    dadoRail.position.set(0, 0.96, -2.94);
+    this.livingRoomGroup.add(dadoRail);
+
+    // Warm Honey-Cream Living Room Floor & Soft Woven Cream Area Rug
+    const floorGeo = new THREE.PlaneGeometry(14.0, 5.2);
+    floorGeo.rotateX(-Math.PI / 2);
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: 0xf4dec0,
+      emissive: new THREE.Color(0xebd0ab),
+      emissiveIntensity: 0.62,
+      roughness: 0.74,
+      metalness: 0.02,
+    });
+    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+    floorMesh.position.set(0, 0.18, -2.1);
+    this.livingRoomGroup.add(floorMesh);
+
+    const rugGeo = new THREE.CylinderGeometry(1.75, 1.75, 0.008, 64);
+    const rugMat = new THREE.MeshStandardMaterial({
+      color: 0xfff4e0,
+      emissive: new THREE.Color(0xfbe6c6),
+      emissiveIntensity: 0.7,
+      roughness: 0.95,
+      metalness: 0.0,
+    });
+    const rugMesh = new THREE.Mesh(rugGeo, rugMat);
+    rugMesh.position.set(0.15, 0.186, -2.15);
+    this.livingRoomGroup.add(rugMesh);
+
+    // LEFT-BACK: Floor-to-Ceiling Sunlit Window + Translucent Warm-White Sheer Curtains (落地暖白纱窗)
+    const windowGroup = new THREE.Group();
+    windowGroup.position.set(-1.18, 1.55, -2.88);
+    this.livingRoomGroup.add(windowGroup);
+
+    const glassGeo = new THREE.PlaneGeometry(1.38, 2.35);
+    const glassMesh = new THREE.Mesh(glassGeo, sunlitWindowGlassMat);
+    glassMesh.position.z = 0.01;
+    windowGroup.add(glassMesh);
+
+    // Window mullions (slender warm-oak architectural grid)
+    const mullionVGeo = new THREE.BoxGeometry(0.026, 2.38, 0.035);
+    for (const mx of [-0.69, 0.0, 0.69]) {
+      const m = new THREE.Mesh(mullionVGeo, warmOakMat);
+      m.position.set(mx, 0, 0.02);
+      windowGroup.add(m);
+    }
+    const mullionHGeo = new THREE.BoxGeometry(1.4, 0.026, 0.035);
+    for (const my of [-1.18, -0.38, 0.42, 1.18]) {
+      const m = new THREE.Mesh(mullionHGeo, warmOakMat);
+      m.position.set(0, my, 0.02);
+      windowGroup.add(m);
+    }
+
+    // Softly pleated translucent warm-white sheer curtains flanking the window
+    const pleatGeo = new THREE.CylinderGeometry(0.055, 0.065, 2.42, 16);
+    for (let i = 0; i < 5; i++) {
+      const leftPleat = new THREE.Mesh(pleatGeo, sheerCurtainMat);
+      leftPleat.scale.set(1.0, 1.0, 0.45);
+      leftPleat.position.set(-0.72 + i * 0.075, -0.02, 0.06 + (i % 2) * 0.012);
+      windowGroup.add(leftPleat);
+
+      const rightPleat = new THREE.Mesh(pleatGeo, sheerCurtainMat);
+      rightPleat.scale.set(1.0, 1.0, 0.45);
+      rightPleat.position.set(0.42 + i * 0.075, -0.02, 0.06 + (i % 2) * 0.012);
+      windowGroup.add(rightPleat);
+    }
+
+    // Feathered Diagonal Warm Afternoon Sunbeams streaming from the living room window
+    const sunbeamTex = this.createFeatheredSunbeamTexture();
+    const sunbeamGeo = new THREE.PlaneGeometry(1.65, 2.8);
+    const sunbeamMat = new THREE.MeshBasicMaterial({
+      map: sunbeamTex,
+      color: 0xfff7e2,
+      transparent: true,
+      opacity: 0.28,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const sunbeam = new THREE.Mesh(sunbeamGeo, sunbeamMat);
+    sunbeam.position.set(-0.62, 1.48, -2.32);
+    sunbeam.rotation.z = -0.34;
+    sunbeam.rotation.y = 0.22;
+    this.livingRoomGroup.add(sunbeam);
+
+    // RIGHT-BACK: Minimalist Warm Cream-Linen Sofa Silhouette (极简暖白亚麻沙发, secondary background read)
+    const sofaGroup = new THREE.Group();
+    sofaGroup.position.set(0.76, 0.34, -2.56);
+    sofaGroup.rotation.y = -0.12;
+    this.livingRoomGroup.add(sofaGroup);
+
+    // Sofa plinth & seat cushions
+    const plinthGeo = new THREE.BoxGeometry(1.68, 0.14, 0.72);
+    const plinthMesh = new THREE.Mesh(plinthGeo, wainscotMat);
+    plinthMesh.position.set(0, -0.04, 0);
+    sofaGroup.add(plinthMesh);
+
+    const seatGeo = new THREE.CapsuleGeometry(0.11, 0.62, 12, 20);
+    seatGeo.rotateZ(Math.PI / 2);
+    seatGeo.scale(1.0, 0.72, 2.65);
+    for (const sx of [-0.41, 0.41]) {
+      const seat = new THREE.Mesh(seatGeo, linenSofaMat);
+      seat.position.set(sx, 0.09, 0.03);
+      sofaGroup.add(seat);
+    }
+
+    // Sofa backrest & soft back cushions
+    const backWallSofaGeo = new THREE.CapsuleGeometry(0.09, 1.52, 12, 20);
+    backWallSofaGeo.rotateZ(Math.PI / 2);
+    backWallSofaGeo.scale(1.0, 2.2, 0.85);
+    const sofaBack = new THREE.Mesh(backWallSofaGeo, linenSofaMat);
+    sofaBack.position.set(0, 0.32, -0.26);
+    sofaGroup.add(sofaBack);
+
+    // Rounded Armrests
+    const armGeo = new THREE.CapsuleGeometry(0.095, 0.54, 12, 20);
+    armGeo.rotateX(Math.PI / 2);
+    for (const ax of [-0.82, 0.82]) {
+      const arm = new THREE.Mesh(armGeo, linenSofaMat);
+      arm.position.set(ax, 0.18, 0.0);
+      sofaGroup.add(arm);
+    }
+
+    // Cozy Throw Pillows on Sofa
+    const pillowGeo = new THREE.SphereGeometry(0.14, 20, 16);
+    pillowGeo.scale(1.05, 0.95, 0.42);
+    const pillow1 = new THREE.Mesh(pillowGeo, pillowWarmMat);
+    pillow1.position.set(-0.56, 0.26, -0.08);
+    pillow1.rotation.set(-0.18, 0.28, 0.12);
+    sofaGroup.add(pillow1);
+
+    const pillow2 = new THREE.Mesh(pillowGeo, pillowAccentMat);
+    pillow2.position.set(0.54, 0.25, -0.08);
+    pillow2.rotation.set(-0.2, -0.25, -0.1);
+    sofaGroup.add(pillow2);
+
+    // WALL ART ABOVE SOFA: Minimalist Warm-Oak Framed Botanical Relief (极简暖木框装饰画)
+    const artGroup = new THREE.Group();
+    artGroup.position.set(0.76, 1.62, -2.91);
+    this.livingRoomGroup.add(artGroup);
+
+    const frameOuterGeo = new THREE.BoxGeometry(0.68, 0.86, 0.024);
+    const frameOuter = new THREE.Mesh(frameOuterGeo, warmOakMat);
+    artGroup.add(frameOuter);
+
+    const canvasInnerGeo = new THREE.PlaneGeometry(0.61, 0.79);
+    const canvasInnerMat = new THREE.MeshStandardMaterial({
+      color: 0xfff8ec,
+      emissive: new THREE.Color(0xfcebd0),
+      emissiveIntensity: 0.72,
+      roughness: 0.9,
+    });
+    const canvasInner = new THREE.Mesh(canvasInnerGeo, canvasInnerMat);
+    canvasInner.position.z = 0.014;
+    artGroup.add(canvasInner);
+
+    const archReliefGeo = new THREE.RingGeometry(0.11, 0.19, 36);
+    const archRelief = new THREE.Mesh(archReliefGeo, pillowAccentMat);
+    archRelief.position.set(0, 0.02, 0.016);
+    artGroup.add(archRelief);
+
+    // MATTE-CREAM CERAMIC FLOOR VASE BESIDE WINDOW (落地素雅暖白陶瓶, x = -0.28, z = -2.58)
+    const vaseProfile = [
+      new THREE.Vector2(0.0, 0.0),
+      new THREE.Vector2(0.08, 0.0),
+      new THREE.Vector2(0.125, 0.18),
+      new THREE.Vector2(0.11, 0.38),
+      new THREE.Vector2(0.052, 0.48),
+      new THREE.Vector2(0.058, 0.52),
+    ];
+    const floorVaseGeo = new THREE.LatheGeometry(vaseProfile, 32);
+    const floorVase = new THREE.Mesh(floorVaseGeo, wainscotMat);
+    floorVase.position.set(-0.28, 0.18, -2.58);
+    this.livingRoomGroup.add(floorVase);
   }
 
   private buildParticleSystem(): void {
@@ -460,19 +842,31 @@ export class EnvironmentManager extends THREE.Group {
     this.particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.particleMesh.xb = {pointerEvents: 'none'};
 
+    this.particleStates = [];
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
-      const radius = 0.16 + (i % 5) * 0.055;
-      const y = 0.94 + ((i * 7) % 10) * 0.075;
+      const radius = 0.14 + (i % 5) * 0.042;
+      const localY = 0.06 + ((i * 7) % 10) * 0.065;
+      const lx = Math.cos(angle) * radius;
+      const lz = Math.sin(angle) * radius;
 
-      this.particlePositions[i * 3] = Math.cos(angle) * radius;
-      this.particlePositions[i * 3 + 1] = y;
-      this.particlePositions[i * 3 + 2] = -1.08 + Math.sin(angle) * radius;
+      this.particlePositions[i * 3] = lx;
+      this.particlePositions[i * 3 + 1] = 0.92 + localY;
+      this.particlePositions[i * 3 + 2] = -1.08 + lz;
 
-      this.particleVelocities[i * 3] = (Math.random() - 0.5) * 0.022;
-      this.particleVelocities[i * 3 + 1] = 0.022 + Math.random() * 0.036;
-      this.particleVelocities[i * 3 + 2] = (Math.random() - 0.5) * 0.022;
+      this.particleVelocities[i * 3] = 0;
+      this.particleVelocities[i * 3 + 1] = 0.015;
+      this.particleVelocities[i * 3 + 2] = 0;
       this.particlePhases[i] = i * 0.45;
+
+      this.particleStates.push({
+        x: lx,
+        y: 0.92 + localY,
+        z: -1.08 + lz,
+        vx: 0,
+        vy: 0.014,
+        vz: 0,
+      });
     }
 
     this.add(this.particleMesh);
@@ -489,6 +883,10 @@ export class EnvironmentManager extends THREE.Group {
     this.targetGroundColor.setHex(spec.groundHex);
     this.targetParticleColor.setHex(spec.particleHex);
 
+    const isLivingRoom = spec.id === 'warm-living-room';
+    this.livingRoomGroup.visible = isLivingRoom;
+    this.coffeeTableGroup.visible = isLivingRoom;
+
     this.rebuildUE5LumenEnvironmentMap(spec);
     this.triggerGestureBurst();
   }
@@ -500,7 +898,17 @@ export class EnvironmentManager extends THREE.Group {
     }
   }
 
-  updateEnvironment(bloom01: number, elapsedSec: number, dt: number): void {
+  getForceFieldState(): BloomForceFieldState {
+    return this.lastForceFieldState;
+  }
+
+  updateEnvironment(
+    bloom01: number,
+    elapsedSec: number,
+    dt: number,
+    bloomVelocity01PerSec = 0,
+    angularSpeedRadPerSec = 0,
+  ): void {
     const safeDt = clamp(dt, 0.001, 0.05);
     const lerpFactor = clamp(safeDt * 4.5, 0.02, 0.25);
 
@@ -525,15 +933,15 @@ export class EnvironmentManager extends THREE.Group {
     this.keyLight.color.lerp(this.targetKeyColor, lerpFactor);
     this.rimLight.color.lerp(this.targetRimColor, lerpFactor);
     this.fillLight.color.lerp(this.targetFillColor, lerpFactor);
-    this.bounceLight.color.lerp(this.targetParticleColor, lerpFactor);
+    this.bounceLight.color.lerp(this.targetGroundColor, lerpFactor);
     this.waterDiscMat.color.lerp(this.targetGroundColor, lerpFactor);
     this.particleMaterial.color.lerp(this.targetParticleColor, lerpFactor);
     this.godRayMat.color.lerp(this.targetKeyColor, lerpFactor);
 
-    this.burstIntensity = Math.max(0, this.burstIntensity - safeDt * 1.4);
+    this.burstIntensity = Math.max(0, this.burstIntensity - safeDt * 1.65);
 
-    this.keyLight.intensity = 0.82 + bloom01 * 0.16 + this.burstIntensity * 0.12;
-    this.rimLight.intensity = 0.58 + bloom01 * 0.18 + this.burstIntensity * 0.12;
+    this.keyLight.intensity = 0.82 + bloom01 * 0.16 + this.burstIntensity * 0.1;
+    this.rimLight.intensity = 0.58 + bloom01 * 0.18 + this.burstIntensity * 0.1;
     this.bounceLight.intensity = 0.22 + bloom01 * 0.12;
 
     for (let i = 0; i < this.godRayMeshes.length; i++) {
@@ -554,48 +962,48 @@ export class EnvironmentManager extends THREE.Group {
       mat.color.copy(this.particleMaterial.color);
     }
 
+    // Force-field damped particle integration: prevents particle splashing or radial overflow
+    const forceField = computeBloomForceFieldDamping(
+      bloom01,
+      bloomVelocity01PerSec,
+      angularSpeedRadPerSec,
+      this.burstIntensity,
+    );
+    this.lastForceFieldState = forceField;
+
     const dummy = new THREE.Object3D();
-    const speedMultiplier = 0.4 + bloom01 * 0.75 + this.burstIntensity * 1.1;
-    const scaleCap = this.lowNoiseMode ? 0.65 : 1.0;
+    const scaleCap = this.lowNoiseMode ? 0.68 : 1.0;
 
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const ix = i * 3;
-      const iy = i * 3 + 1;
-      const iz = i * 3 + 2;
-
+    for (let i = 0; i < this.particleStates.length; i++) {
       const phase = this.particlePhases[i];
-      const swirlAngle = elapsedSec * (0.28 + bloom01 * 0.38) + phase;
+      const baseRadius = 0.14 + (i % 5) * 0.042;
+      const nextState = stepForceFieldDampedParticle(this.particleStates[i], {
+        centerX: 0,
+        centerY: 0.92,
+        centerZ: -1.08,
+        targetOrbitRadius: baseRadius * (0.75 + 0.25 * bloom01),
+        maxRadius: 0.36,
+        minY: 0.02,
+        maxY: 1.76,
+        swirlSpeed: 0.022 + bloom01 * 0.028,
+        updraftSpeed: 0.016 + bloom01 * 0.024,
+        phase,
+        elapsedSec,
+        dt: safeDt,
+        damping: forceField,
+      });
+      this.particleStates[i] = nextState;
 
-      this.particlePositions[ix] +=
-        (Math.cos(swirlAngle) * 0.036 + this.particleVelocities[ix]) *
-        safeDt *
-        speedMultiplier;
-      this.particlePositions[iy] +=
-        this.particleVelocities[iy] * safeDt * speedMultiplier;
-      this.particlePositions[iz] +=
-        (Math.sin(swirlAngle) * 0.036 + this.particleVelocities[iz]) *
-        safeDt *
-        speedMultiplier;
-
-      if (this.particlePositions[iy] > 1.78) {
-        const respawnAngle =
-          (i / PARTICLE_COUNT) * Math.PI * 2 + elapsedSec * 0.2;
-        const respawnR = 0.15 + (i % 5) * 0.048;
-        this.particlePositions[ix] = Math.cos(respawnAngle) * respawnR;
-        this.particlePositions[iy] = 0.92;
-        this.particlePositions[iz] = -1.08 + Math.sin(respawnAngle) * respawnR;
-      }
+      this.particlePositions[i * 3] = nextState.x;
+      this.particlePositions[i * 3 + 1] = nextState.y;
+      this.particlePositions[i * 3 + 2] = nextState.z;
 
       const pulse =
         (0.5 + 0.5 * Math.sin(elapsedSec * 2.2 + phase)) *
         (0.38 + bloom01 * 0.48) *
+        forceField.splatKineticCompression *
         scaleCap;
-
-      dummy.position.set(
-        this.particlePositions[ix],
-        this.particlePositions[iy],
-        this.particlePositions[iz],
-      );
+      dummy.position.set(nextState.x, nextState.y, nextState.z);
       dummy.scale.setScalar(pulse);
       dummy.updateMatrix();
       this.particleMesh.setMatrixAt(i, dummy.matrix);

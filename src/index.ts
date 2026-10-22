@@ -9,7 +9,7 @@ async function startFloraStudio(): Promise<void> {
   );
   options.enableHands();
   options.enableGestures();
-  options.enableReticles();
+  options.reticles.enabled = false;
   options.gestures.setGestureEnabled('point', true);
   options.gestures.setGestureEnabled('spread', true);
 

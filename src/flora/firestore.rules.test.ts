@@ -73,7 +73,7 @@ function evaluateHardenedRules(
       if (
         isOwner &&
         isValidId(userId) &&
-        req.existingData?.uid === req.auth!.uid
+        (!req.existingData || req.existingData.uid === req.auth!.uid)
       ) {
         return 'ALLOWED';
       }
@@ -122,7 +122,7 @@ function evaluateHardenedRules(
         isVerifiedOwner &&
         isValidId(userId) &&
         isValidId(infoId) &&
-        req.existingData?.uid === req.auth!.uid &&
+        (!req.existingData || req.existingData.uid === req.auth!.uid) &&
         hasParentNow
       ) {
         return 'ALLOWED';
@@ -188,7 +188,7 @@ function evaluateHardenedRules(
         isOwner &&
         isValidId(userId) &&
         isValidId(presetId) &&
-        req.existingData?.ownerId === req.auth!.uid &&
+        (!req.existingData || req.existingData.ownerId === req.auth!.uid) &&
         hasParentNow
       ) {
         return 'ALLOWED';
@@ -556,6 +556,30 @@ test('Phase 0 Dirty Dozen Security TDD: All 12 adversarial payloads return PERMI
       requestTime: NOW,
       parentUserDoc: {uid: 'user_1'},
       incomingData: makeValidPreset(),
+    }),
+    'ALLOWED',
+  );
+
+  // Positive control: Owner getDoc before profile or preset exists (resource == null) succeeds
+  assert.equal(
+    evaluateHardenedRules({
+      operation: 'get',
+      path: '/users/user_1',
+      auth: VALID_AUTH,
+      requestTime: NOW,
+      existingData: undefined,
+    }),
+    'ALLOWED',
+  );
+
+  assert.equal(
+    evaluateHardenedRules({
+      operation: 'get',
+      path: '/users/user_1/presets/preset_new',
+      auth: VALID_AUTH,
+      requestTime: NOW,
+      parentUserDoc: {uid: 'user_1'},
+      existingData: undefined,
     }),
     'ALLOWED',
   );

@@ -11,6 +11,7 @@ import {
   analyzeVideoFramePixels,
   HandSignalDenoiser,
   SecondHandGestureDetector,
+  evaluateDetailedBloomKinematics,
   clamp,
   type Point3D,
   type HandPoseLabel,
@@ -181,6 +182,9 @@ export class HandTrackerOverlay {
   private unsubAuth: (() => void) | null = null;
   private unsubPresets: (() => void) | null = null;
   private cloudDrawerOpen = false;
+  private settingsDrawerOpen = false;
+  private operatingHoldEnabled = false;
+  private operatingActiveUntilMs = 0;
 
   constructor(callbacks: HandTrackerCallbacks) {
     this.callbacks = callbacks;
@@ -199,13 +203,36 @@ export class HandTrackerOverlay {
     this.bindEvents();
     this.initFirebaseCloudSync();
     this.updateSimButtonsUI();
+    this.installBenignWasmLogFilter();
     const isHeadless =
       typeof navigator !== 'undefined' &&
       (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
     if (!isHeadless) {
       void this.initMediaPipeModel();
-      void this.tryAutoStartWebcam();
     }
+  }
+
+  private installBenignWasmLogFilter(): void {
+    const win = window as unknown as {__floraWasmFilterInstalled?: boolean};
+    if (win.__floraWasmFilterInstalled) return;
+    win.__floraWasmFilterInstalled = true;
+    const origError = console.error.bind(console);
+    console.error = (...args: unknown[]) => {
+      const first = typeof args[0] === 'string' ? args[0] : '';
+      if (
+        first.includes('Created TensorFlow Lite XNNPACK delegate') ||
+        first.startsWith('INFO:') ||
+        first.startsWith('I0000') ||
+        first.startsWith('W0000') ||
+        first.includes('hand_gesture_recognizer_graph') ||
+        first.includes('inference_feedback_manager') ||
+        first.includes('landmark_projection_calculator')
+      ) {
+        console.info(...args);
+        return;
+      }
+      origError(...args);
+    };
   }
 
   private buildDOM(): void {
@@ -215,18 +242,13 @@ export class HandTrackerOverlay {
     this.rootEl = document.createElement('div');
     this.rootEl.id = 'flora-hud-root';
     this.rootEl.className = 'flora-hud-root';
+    this.rootEl.dataset.operating = 'false';
 
     const firstSpec = FLOWER_LIBRARY[0];
 
     this.rootEl.innerHTML = `
-      <!-- Top Editorial Bar -->
-      <header class="flora-top-bar">
-        <div class="flora-brand">
-          <span class="flora-brand-mark">◆</span>
-          <span class="flora-brand-title">FLORA</span>
-          <span class="flora-brand-sub">多纲目植物图谱 · 智能多情境手势 3D 实验室</span>
-        </div>
-
+      <!-- Top-Right Minimalist Scene & Collapsible Settings Toolbar (Auto-hidden during flower manipulation) -->
+      <header class="flora-minimal-toolbar" id="flora-minimal-toolbar">
         <nav class="flora-env-bar" aria-label="Interactive Environments">
           ${ENVIRONMENT_LIBRARY.map(
             (env, idx) => `
@@ -244,181 +266,83 @@ export class HandTrackerOverlay {
         </nav>
 
         <div class="flora-top-actions">
-          <button type="button" id="flora-3dgs-btn" class="flora-action-btn active" title="切换 3D 高斯泼溅 (3D Gaussian Splatting) 辐射场渲染模式">
-            <span>3DGS 实景: 混合</span>
+          <button
+            type="button"
+            id="flora-pure-view-btn"
+            class="flora-action-btn"
+            title="操作花朵时自动隐藏多余设置，或点击锁定只保留摄像头画面和绽放度"
+          >
+            <span>专注观察: 仅留镜头与绽放度</span>
           </button>
-          <button type="button" id="flora-denoise-btn" class="flora-action-btn active" title="切换 1€ 卡尔曼手势平滑滤波与 3D 画面降噪强度">
-            <span>降噪滤波: 强</span>
-          </button>
-          <button type="button" id="flora-rotate-btn" class="flora-action-btn active" title="开启或关闭 3D 花朵 360° 自动旋转展示">
-            <span>自动旋转: 开</span>
-          </button>
-          <button type="button" id="flora-auto-btn" class="flora-action-btn" title="在未开启摄像头时，开启或关闭自动手势演示">
-            <span>模拟: 手动控制</span>
-          </button>
-          <button type="button" id="flora-cloud-btn" class="flora-action-btn" title="Firebase 云端花谱同步：保存与加载 3D 花姿预设">
-            <span id="flora-cloud-btn-label">☁️ 云端花谱</span>
-          </button>
-          <button type="button" id="flora-cam-btn" class="flora-action-btn flora-action-btn-cam" title="开启或关闭真实摄像头手部追踪">
-            <span id="flora-cam-btn-label">开启摄像头</span>
-          </button>
-          <button type="button" id="flora-xr-btn" class="flora-action-btn flora-action-btn-xr" title="进入沉浸式 WebXR 空间视图">
-            <span>进入 XR 空间</span>
+          <button
+            type="button"
+            id="flora-settings-toggle-btn"
+            class="flora-action-btn"
+            aria-expanded="false"
+            title="展开或收起花种选择与高级校准设置"
+          >
+            <span>切换花种 / 设置 ▾</span>
           </button>
         </div>
       </header>
 
-      <!-- Firebase Cloud Botanical Presets Drawer -->
-      <section id="flora-cloud-drawer" aria-label="Firebase Cloud Botanical Presets" style="display:none; position:fixed; top:58px; right:18px; width:340px; z-index:45; background:rgba(14,12,20,0.94); border:1px solid rgba(212,175,55,0.36); border-radius:12px; padding:12px 14px; flex-direction:column; gap:10px; box-shadow:0 16px 40px rgba(0,0,0,0.65); backdrop-filter:blur(14px); pointer-events:auto;">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span style="font-size:12.5px; font-weight:600; color:#fef08a;">☁️ Firebase 云端花谱库 (Firestore)</span>
-          <span id="flora-auth-status" style="font-size:11px; color:#94a3b8; background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:6px;">未登录</span>
-        </div>
-        <div style="display:flex; gap:8px;">
-          <button type="button" id="flora-auth-signin-btn" class="flora-mini-btn flora-mini-btn-accent" style="flex:1;">Google 账号登录</button>
-          <button type="button" id="flora-auth-signout-btn" class="flora-mini-btn" style="display:none; flex:1;">退出登录</button>
-        </div>
-        <div id="flora-cloud-save-form" style="display:none; gap:6px; align-items:center;">
-          <input
-            id="flora-preset-title-input"
-            type="text"
-            maxlength="64"
-            placeholder="输入花姿名称 (如: 九品粉莲·盛放)"
-            aria-label="云端花姿预设名称"
-            style="flex:1; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:5px 8px; color:#f8fafc; font-size:12px; outline:none;"
-          />
-          <button type="button" id="flora-save-preset-btn" class="flora-mini-btn flora-mini-btn-accent">💾 保存花姿</button>
-        </div>
-        <div id="flora-cloud-presets-list" style="display:flex; flex-direction:column; gap:6px; max-height:190px; overflow-y:auto; font-size:11.5px; color:#cbd5e1;">
-          <div style="opacity:0.75; line-height:1.45;">登录 Google 账号后即可将当前 3D 花姿、绽放度与 3DGS 模式同步至云端</div>
-        </div>
-      </section>
-
-      <!-- Left Botanical Editorial Specimen Info -->
-      <aside class="flora-left-editorial">
-        <div class="flora-class-badge" id="flora-species-class">${firstSpec.classZh}</div>
-        <div class="flora-index-tag" id="flora-species-index">${firstSpec.indexLabel} · ${firstSpec.binomial.toUpperCase()}</div>
-        <h1 class="flora-species-title-zh" id="flora-species-zh">${firstSpec.nameZh}</h1>
-        <div class="flora-species-title-en" id="flora-species-en">${firstSpec.nameEn}</div>
-        <div class="flora-species-meaning" id="flora-species-meaning">${firstSpec.meaningZh}</div>
-        <p class="flora-species-poem" id="flora-species-poem">
-          ${firstSpec.poemZh}
-        </p>
-
-        <div class="flora-telemetry-card">
-          <div class="flora-telemetry-row">
-            <span class="flora-telemetry-label">BLOOM APERTURE / 花冠绽放度</span>
+      <!-- Top-Left Essential Bloom Aperture Readout Card (Always visible for observing flower changes) -->
+      <aside class="flora-bloom-card" id="flora-bloom-card" aria-label="Flower Bloom Aperture Readout">
+        <div class="flora-bloom-header-row">
+          <div class="flora-bloom-species-meta">
+            <span class="flora-class-badge" id="flora-species-class">${firstSpec.classZh}</span>
+            <h1 class="flora-species-title-zh" id="flora-species-zh">${firstSpec.nameZh}</h1>
+          </div>
+          <div class="flora-bloom-pct-block">
+            <span class="flora-telemetry-label">花冠绽放度</span>
             <span class="flora-telemetry-val" id="flora-bloom-val">78%</span>
           </div>
-          <div class="flora-bloom-bar-track">
-            <div class="flora-bloom-bar-fill" id="flora-bloom-bar-fill" style="width: 78%"></div>
-          </div>
-          <div class="flora-bloom-Stage-row">
-            <span class="flora-stage-badge" id="flora-bloom-stage">半开雅韵 · Half-Bloom</span>
-            <span class="flora-pose-badge" id="flora-pose-badge">指尖开合 · 78%</span>
-          </div>
-          <div class="flora-context-status-row" id="flora-context-situation">
-            当前情境: 捏合拇指食指后移动可自由改变花朵 (X/Y/Z) 三轴角度并俯视花蕊
-          </div>
-          <div class="flora-rotation-row">
-            <span class="flora-rotation-readout" id="flora-rotation-readout">3D 姿态角: X俯仰 33° · Y水平 0° · Z翻滚 0°</span>
-            <div class="flora-rot-mini-group">
-              <button type="button" class="flora-rot-chip" id="flora-rot-top" title="大倾角俯视花心与花蕊结构">俯视花蕊</button>
-              <button type="button" class="flora-rot-chip" id="flora-rot-roll" title="绕 Z 轴侧倾翻滚赏花">Z轴侧倾</button>
-              <button type="button" class="flora-rot-chip" id="flora-rot-reset" title="重置 X/Y/Z 三轴姿态角">视角归零</button>
-            </div>
-          </div>
         </div>
 
-        <!-- Multi-Context Interaction Mode Selector -->
-        <div class="flora-manual-slider-wrap">
-          <div class="flora-mode-header-row">
-            <span class="flora-slider-label">手势交互策略 (防误触多情境模式)</span>
-          </div>
-          <div class="flora-logic-mode-bar" role="radiogroup" aria-label="Gesture Interaction Logic Mode">
-            <button type="button" class="flora-logic-btn active" data-logic-mode="smart-context" title="单手张合控开花、捏合移动旋转(X/Y/Z)轴；副手或单指悬停1秒换花">
-              智能多情境
-            </button>
-            <button type="button" class="flora-logic-btn" data-logic-mode="bloom-orbit-only" title="锁定当前花朵品种与场景，手势100%仅用于控制花朵开合与(X/Y/Z)旋转">
-              锁定品种·仅控花与轴
-            </button>
-            <button type="button" class="flora-logic-btn" data-logic-mode="dual-hand-split" title="右手专职控制开花与捏合旋转(X/Y/Z)，仅当左手(副手)入镜时才切换花朵">
-              双手严格分工
-            </button>
-          </div>
+        <div class="flora-bloom-bar-track">
+          <div class="flora-bloom-bar-fill" id="flora-bloom-bar-fill" style="width: 78%"></div>
+        </div>
 
-          <div class="flora-calibration-row">
-            <label for="flora-sensitivity-slider" class="flora-slider-label">
-              灵敏度校准 (摄像头/光照适配)
-            </label>
-            <span class="flora-calibration-val" id="flora-sensitivity-val">标准均衡 (55%)</span>
-          </div>
-          <input
-            id="flora-sensitivity-slider"
-            type="range"
-            min="10"
-            max="100"
-            step="1"
-            value="55"
-            aria-label="手势识别灵敏度校准滑块"
-            class="flora-sensitivity-slider"
-          />
+        <div class="flora-bloom-Stage-row">
+          <span class="flora-stage-badge" id="flora-bloom-stage">半开雅韵 · 内层花瓣舒展</span>
+          <span class="flora-pose-badge" id="flora-pose-badge">指尖开合 · 78%</span>
+        </div>
 
-          <div class="flora-calibration-row">
-            <label for="flora-bloom-slider" class="flora-slider-label">
-              花冠绽放度 (展露内层花蕊)
-            </label>
-          </div>
-          <input
-            id="flora-bloom-slider"
-            type="range"
-            min="0"
-            max="100"
-            value="78"
-            aria-label="花朵绽放度手动滑块"
-            class="flora-bloom-slider"
-          />
-          <div class="flora-pose-quick-btns">
-            <button type="button" class="flora-mini-btn" data-quick-bloom="0">握拳含苞 0%</button>
-            <button type="button" class="flora-mini-btn" data-quick-bloom="100">全开展蕊 100%</button>
-            <button type="button" class="flora-mini-btn" id="flora-inspect-stamen-btn">微距看花蕊</button>
-            <button type="button" class="flora-mini-btn flora-mini-btn-accent" id="flora-swipe-sim-btn">下一株花 →</button>
-          </div>
+        <input
+          id="flora-bloom-slider"
+          type="range"
+          min="0"
+          max="100"
+          value="78"
+          aria-label="花朵绽放度手动滑块"
+          class="flora-bloom-slider"
+        />
+
+        <div class="flora-pose-quick-btns">
+          <button type="button" class="flora-mini-btn" data-quick-bloom="0">含苞 0%</button>
+          <button type="button" class="flora-mini-btn" data-quick-bloom="100">盛放 100%</button>
+          <button type="button" class="flora-mini-btn" id="flora-inspect-stamen-btn">俯视花蕊</button>
+          <button type="button" class="flora-mini-btn flora-mini-btn-accent" id="flora-swipe-sim-btn">下一株花 →</button>
         </div>
       </aside>
 
-      <!-- Bottom Row: Bottom-Left Hand Skeleton Monitor + Bottom-Center 8-Class Species Dock -->
-      <footer class="flora-bottom-row">
-        <!-- Bottom-Left Camera & ML Hand Skeleton Monitor -->
-        <div class="flora-cam-monitor" id="flora-cam-monitor">
-          <div class="flora-cam-header">
-            <span class="flora-cam-status-dot" id="flora-cam-dot"></span>
-            <span class="flora-cam-title" id="flora-cam-status-text">ML 骨骼追踪 · 捏合移动可控 X/Y/Z 轴</span>
-            <div class="flora-cam-inline-actions">
-              <button type="button" id="flora-cam-inline-btn" class="flora-cam-chip flora-cam-chip-primary">
-                摄像头
-              </button>
-              <button type="button" id="flora-video-inline-btn" class="flora-cam-chip" title="使用实拍手势视频进行实时 ML 骨骼识别测试">
-                实测视频
-              </button>
-              <button type="button" id="flora-pinch-inline-btn" class="flora-cam-chip" title="模拟手指捏合状态，在下方画面拖动即可改变花朵 X/Y/Z 三轴角度">
-                捏合转轴(X/Y/Z)
-              </button>
-              <button type="button" id="flora-sim-inline-btn" class="flora-cam-chip">
-                手动模拟
-              </button>
-            </div>
+      <!-- Collapsible Secondary Drawer: 8 Flower Species + Calibration + Cloud Presets (Hidden by default & auto-closed when operating flower) -->
+      <section
+        id="flora-settings-drawer"
+        class="flora-settings-drawer"
+        aria-label="Botanical Species and Calibration Drawer"
+        style="display:none;"
+      >
+        <div class="flora-drawer-section">
+          <div class="flora-drawer-header">
+            <span class="flora-drawer-title">八大名花图谱切换</span>
+            <span class="flora-index-tag" id="flora-species-index">${firstSpec.indexLabel} · ${firstSpec.binomial.toUpperCase()}</span>
           </div>
-          <div class="flora-cam-viewport">
-            <video id="flora-webcam-video" class="flora-webcam-video" autoplay playsinline muted loop crossorigin="anonymous"></video>
-            <canvas id="flora-skeleton-canvas" class="flora-skeleton-canvas" width="360" height="200"></canvas>
-            <div class="flora-gesture-toast" id="flora-gesture-toast">已就绪</div>
-          </div>
-        </div>
+          <div class="flora-species-title-en" id="flora-species-en" style="display:none;">${firstSpec.nameEn}</div>
+          <div class="flora-species-meaning" id="flora-species-meaning" style="display:none;">${firstSpec.meaningZh}</div>
+          <p class="flora-species-poem" id="flora-species-poem" style="display:none;">${firstSpec.poemZh}</p>
 
-        <!-- Bottom-Center 8 Botanical Classes Switcher -->
-        <div class="flora-species-dock" role="region" aria-label="Flower Species Selector">
-          <div class="flora-species-cards">
+          <div class="flora-species-cards" role="region" aria-label="Flower Species Selector">
             ${FLOWER_LIBRARY.map(
               (f, idx) => `
               <button
@@ -437,10 +361,111 @@ export class HandTrackerOverlay {
             `,
             ).join('')}
           </div>
-          <div class="flora-dock-legend">
-            <span>• 拇指+食指捏住移动：自由改变花朵 (X俯仰 / Y水平 / Z翻滚) 三轴角度并俯视花蕊</span>
-            <span>• 五指张合(0–5指)：平滑控制花冠绽放度(满开100%完全展露立体花蕊)</span>
-            <span>• 换花指令：副手挥动 / 单指悬停1秒确认</span>
+        </div>
+
+        <div class="flora-drawer-section">
+          <div class="flora-mode-header-row">
+            <span class="flora-slider-label">手势交互策略与姿态控制</span>
+            <span class="flora-rotation-readout" id="flora-rotation-readout">3D 姿态角: X俯仰 33° · Y水平 0° · Z翻滚 0°</span>
+          </div>
+          <div class="flora-context-status-row" id="flora-context-situation">
+            当前情境: 捏合拇指食指后移动可自由改变花朵 (X/Y/Z) 三轴角度并俯视花蕊
+          </div>
+          <div class="flora-logic-mode-bar" role="radiogroup" aria-label="Gesture Interaction Logic Mode">
+            <button type="button" class="flora-logic-btn active" data-logic-mode="smart-context">
+              智能多情境
+            </button>
+            <button type="button" class="flora-logic-btn" data-logic-mode="bloom-orbit-only">
+              锁定品种·仅控花与轴
+            </button>
+            <button type="button" class="flora-logic-btn" data-logic-mode="dual-hand-split">
+              双手严格分工
+            </button>
+          </div>
+
+          <div class="flora-calibration-row">
+            <label for="flora-sensitivity-slider" class="flora-slider-label">
+              灵敏度校准
+            </label>
+            <span class="flora-calibration-val" id="flora-sensitivity-val">标准均衡 (55%)</span>
+          </div>
+          <input
+            id="flora-sensitivity-slider"
+            type="range"
+            min="10"
+            max="100"
+            step="1"
+            value="55"
+            aria-label="手势识别灵敏度校准滑块"
+            class="flora-sensitivity-slider"
+          />
+
+          <div class="flora-drawer-quick-grid">
+            <button type="button" class="flora-rot-chip" id="flora-rot-top">俯视花蕊</button>
+            <button type="button" class="flora-rot-chip" id="flora-rot-roll">Z轴侧倾</button>
+            <button type="button" class="flora-rot-chip" id="flora-rot-reset">视角归零</button>
+            <button type="button" id="flora-3dgs-btn" class="flora-rot-chip active">3DGS 实景: 混合</button>
+            <button type="button" id="flora-denoise-btn" class="flora-rot-chip active">降噪滤波: 强</button>
+            <button type="button" id="flora-rotate-btn" class="flora-rot-chip active">自动旋转: 开</button>
+            <button type="button" id="flora-auto-btn" class="flora-rot-chip">模拟: 手动控制</button>
+            <button type="button" id="flora-cloud-btn" class="flora-rot-chip"><span id="flora-cloud-btn-label">☁️ 云端花谱</span></button>
+            <button type="button" id="flora-cam-btn" class="flora-rot-chip"><span id="flora-cam-btn-label">开启摄像头</span></button>
+            <button type="button" id="flora-xr-btn" class="flora-rot-chip">进入 XR 空间</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Firebase Cloud Botanical Presets Drawer -->
+      <section id="flora-cloud-drawer" aria-label="Firebase Cloud Botanical Presets" style="display:none; position:fixed; top:58px; right:20px; width:330px; z-index:48; background:rgba(255,253,249,0.96); border:1px solid rgba(180,158,125,0.42); border-radius:12px; padding:12px 14px; flex-direction:column; gap:10px; box-shadow:0 16px 36px rgba(45,38,30,0.14); backdrop-filter:blur(14px); pointer-events:auto; color:#2c2623;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:12.5px; font-weight:600; color:#7c5832;">☁️ Firebase 云端花谱库 (Firestore)</span>
+          <span id="flora-auth-status" style="font-size:11px; color:#645a52; background:rgba(44,38,35,0.06); padding:2px 8px; border-radius:6px;">未登录</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="flora-auth-signin-btn" class="flora-mini-btn flora-mini-btn-accent" style="flex:1;">Google 账号登录</button>
+          <button type="button" id="flora-auth-signout-btn" class="flora-mini-btn" style="display:none; flex:1;">退出登录</button>
+        </div>
+        <div id="flora-cloud-save-form" style="display:none; gap:6px; align-items:center;">
+          <input
+            id="flora-preset-title-input"
+            type="text"
+            maxlength="64"
+            placeholder="输入花姿名称 (如: 九品粉莲·盛放)"
+            aria-label="云端花姿预设名称"
+            style="flex:1; background:rgba(255,255,255,0.9); border:1px solid rgba(180,158,125,0.45); border-radius:6px; padding:5px 8px; color:#2c2623; font-size:12px; outline:none;"
+          />
+          <button type="button" id="flora-save-preset-btn" class="flora-mini-btn flora-mini-btn-accent">💾 保存花姿</button>
+        </div>
+        <div id="flora-cloud-presets-list" style="display:flex; flex-direction:column; gap:6px; max-height:190px; overflow-y:auto; font-size:11.5px; color:#574f49;">
+          <div style="opacity:0.85; line-height:1.45;">登录 Google 账号后即可将当前 3D 花姿、绽放度与 3DGS 模式同步至云端</div>
+        </div>
+      </section>
+
+      <!-- Bottom-Left Camera & ML Hand Skeleton Monitor (Always visible for hand interaction) -->
+      <footer class="flora-bottom-row">
+        <div class="flora-cam-monitor" id="flora-cam-monitor">
+          <div class="flora-cam-header">
+            <span class="flora-cam-status-dot" id="flora-cam-dot"></span>
+            <span class="flora-cam-title" id="flora-cam-status-text">摄像头画面 · 手势控花与捏合转轴</span>
+            <div class="flora-cam-inline-actions">
+              <button type="button" id="flora-cam-inline-btn" class="flora-cam-chip flora-cam-chip-primary">
+                摄像头
+              </button>
+              <button type="button" id="flora-video-inline-btn" class="flora-cam-chip" title="使用实拍手势视频进行实时 ML 骨骼识别测试">
+                实测视频
+              </button>
+              <button type="button" id="flora-pinch-inline-btn" class="flora-cam-chip" title="模拟手指捏合状态，在下方画面拖动即可改变花朵 X/Y/Z 三轴角度">
+                捏合转轴
+              </button>
+              <button type="button" id="flora-sim-inline-btn" class="flora-cam-chip">
+                手动模拟
+              </button>
+            </div>
+          </div>
+          <div class="flora-cam-viewport">
+            <video id="flora-webcam-video" class="flora-webcam-video" autoplay playsinline muted loop crossorigin="anonymous"></video>
+            <canvas id="flora-skeleton-canvas" class="flora-skeleton-canvas" width="320" height="176"></canvas>
+            <div class="flora-gesture-toast" id="flora-gesture-toast">已就绪</div>
           </div>
         </div>
       </footer>
@@ -514,7 +539,83 @@ export class HandTrackerOverlay {
     );
   }
 
+  /**
+   * Automatically hides non-essential UI controls during flower manipulation so only the
+   * Camera View (#flora-cam-monitor) and Bloom Percentage Card (#flora-bloom-card) remain visible.
+   */
+  notifyFlowerInteraction(durationMs = 2400): void {
+    this.operatingActiveUntilMs = Math.max(
+      this.operatingActiveUntilMs,
+      performance.now() + durationMs,
+    );
+    if (this.settingsDrawerOpen) {
+      this.settingsDrawerOpen = false;
+      const drawer = document.getElementById('flora-settings-drawer');
+      if (drawer) drawer.style.display = 'none';
+      const toggleBtn = document.getElementById('flora-settings-toggle-btn');
+      toggleBtn?.classList.remove('active');
+      toggleBtn?.setAttribute('aria-expanded', 'false');
+    }
+    if (this.cloudDrawerOpen) {
+      this.cloudDrawerOpen = false;
+      const cDrawer = document.getElementById('flora-cloud-drawer');
+      if (cDrawer) cDrawer.style.display = 'none';
+    }
+    this.syncOperatingHUDState();
+  }
+
+  setOperatingHold(enabled: boolean): void {
+    this.operatingHoldEnabled = enabled;
+    const pureBtn = document.getElementById('flora-pure-view-btn');
+    if (pureBtn) {
+      pureBtn.classList.toggle('active', enabled);
+      pureBtn.textContent = enabled
+        ? '已锁定: 仅留镜头与绽放度'
+        : '专注观察: 仅留镜头与绽放度';
+    }
+    if (enabled) {
+      this.notifyFlowerInteraction(600000);
+    } else {
+      this.operatingActiveUntilMs = 0;
+      this.syncOperatingHUDState();
+    }
+  }
+
+  isOperatingViewActive(): boolean {
+    return (
+      this.operatingHoldEnabled ||
+      performance.now() < this.operatingActiveUntilMs
+    );
+  }
+
+  private syncOperatingHUDState(): void {
+    const isOp = this.isOperatingViewActive();
+    this.rootEl.classList.toggle('flora-hud-operating', isOp);
+    this.rootEl.dataset.operating = isOp ? 'true' : 'false';
+  }
+
   private bindEvents(): void {
+    const settingsToggleBtn = document.getElementById(
+      'flora-settings-toggle-btn',
+    );
+    const settingsDrawer = document.getElementById('flora-settings-drawer');
+    settingsToggleBtn?.addEventListener('click', () => {
+      this.settingsDrawerOpen = !this.settingsDrawerOpen;
+      if (settingsDrawer) {
+        settingsDrawer.style.display = this.settingsDrawerOpen ? 'flex' : 'none';
+      }
+      settingsToggleBtn.classList.toggle('active', this.settingsDrawerOpen);
+      settingsToggleBtn.setAttribute(
+        'aria-expanded',
+        this.settingsDrawerOpen ? 'true' : 'false',
+      );
+    });
+
+    const pureViewBtn = document.getElementById('flora-pure-view-btn');
+    pureViewBtn?.addEventListener('click', () => {
+      this.setOperatingHold(!this.operatingHoldEnabled);
+    });
+
     this.speciesButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = Number(btn.dataset.speciesIndex || 0);
@@ -564,6 +665,7 @@ export class HandTrackerOverlay {
     this.bloomSliderEl.addEventListener('input', () => {
       this.simMode = 'interactive';
       this.updateSimButtonsUI();
+      this.notifyFlowerInteraction(2600);
       const val = Number(this.bloomSliderEl.value);
       this.setSimulatedBloom(val);
     });
@@ -579,6 +681,7 @@ export class HandTrackerOverlay {
         btn.addEventListener('click', () => {
           this.simMode = 'interactive';
           this.updateSimButtonsUI();
+          this.notifyFlowerInteraction(2200);
           const target = Number(btn.dataset.quickBloom || 0);
           this.setSimulatedBloom(target);
         });
@@ -589,6 +692,7 @@ export class HandTrackerOverlay {
       ?.addEventListener('click', () => {
         this.simMode = 'interactive';
         this.updateSimButtonsUI();
+        this.notifyFlowerInteraction(2600);
         this.setSimulatedBloom(100);
         this.simulatedPitchX = 1.22;
         this.callbacks.onRotateStep(0, 1.22, 0, false);
@@ -694,6 +798,7 @@ export class HandTrackerOverlay {
       this.dragLastY = e.clientY;
       this.simMode = 'interactive';
       this.updateSimButtonsUI();
+      this.notifyFlowerInteraction(2600);
       if (!this.simulatedPinchGrabActive && !e.shiftKey) {
         this.updateSpreadFromCanvasPointer(e);
       }
@@ -703,6 +808,7 @@ export class HandTrackerOverlay {
     this.canvasEl.addEventListener('pointermove', (e) => {
       if (!this.isDraggingCanvas || this.webcamRunning || this.videoDemoRunning)
         return;
+      this.notifyFlowerInteraction(2600);
       const dx = e.clientX - this.dragLastX;
       const dy = e.clientY - this.dragLastY;
 
@@ -765,6 +871,7 @@ export class HandTrackerOverlay {
   simulatePinchDragDelta(dx: number, dy: number, dz = 0): void {
     this.simMode = 'interactive';
     this.simulatedPinchGrabActive = true;
+    this.notifyFlowerInteraction(2600);
     this.pinchModeInlineBtn?.classList.add('active');
     this.simulatedHandX = clamp(this.simulatedHandX + dx, 0.1, 0.9);
     this.simulatedHandY = clamp(this.simulatedHandY + dy, 0.1, 0.9);
@@ -1135,15 +1242,9 @@ export class HandTrackerOverlay {
     this.bloomValueEl.textContent = `${rounded}%`;
     this.bloomBarFillEl.style.width = `${rounded}%`;
 
-    let stageLabel = '半开雅韵 · Half-Bloom';
-    if (rounded <= 8) {
-      stageLabel = '含苞待放 · Closed Bud';
-    } else if (rounded < 40) {
-      stageLabel = '初绽微启 · Early Bud';
-    } else if (rounded >= 85) {
-      stageLabel = '倾城满开 · 展露花蕊';
-    }
-    this.bloomStateBadgeEl.textContent = stageLabel;
+    const details = evaluateDetailedBloomKinematics(rounded / 100);
+    this.bloomStateBadgeEl.textContent = `${details.stageNameZh} · ${details.stageDetailZh.split(' · ')[0]}`;
+    this.bloomStateBadgeEl.title = `${details.stageDetailZh} (力场阻尼防溢保护中)`;
     this.poseBadgeEl.textContent =
       classification.dwellActionLabelZh || classification.labelZh;
   }
@@ -1383,6 +1484,7 @@ export class HandTrackerOverlay {
   }
 
   update(elapsedSec: number, dt: number): void {
+    this.syncOperatingHUDState();
     if (this.secondHandSwipeFlash > 0) {
       this.secondHandSwipeFlash = Math.max(
         0,
@@ -1549,6 +1651,7 @@ export class HandTrackerOverlay {
     dt: number,
     mlHints: Array<MLGestureHint | null> = [],
   ): void {
+    this.notifyFlowerInteraction(1800);
     const paired = hands.map((h, idx) => ({
       pts: h.map((pt) => ({x: 1 - pt.x, y: pt.y, z: pt.z})),
       hint: mlHints[idx] ?? null,
@@ -1723,8 +1826,24 @@ export class HandTrackerOverlay {
     elapsedSec: number,
     pinchGrab = false,
   ): Point3D[] {
-    const s = pinchGrab ? 0.04 : clamp(spread01, 0, 1);
-    const otherS = pinchGrab ? 0.85 : s;
+    if (pinchGrab) {
+      return buildPresetPoseLandmarks(
+        'pinch-grab',
+        this.simulatedHandX,
+        this.simulatedHandY,
+        spread01,
+      );
+    }
+    if (spread01 <= 0.08) {
+      return buildPresetPoseLandmarks(
+        'closed-fist',
+        this.simulatedHandX,
+        this.simulatedHandY,
+        0,
+      );
+    }
+    const s = clamp(spread01, 0, 1);
+    const otherS = s;
     const breathe = Math.sin(elapsedSec * 1.8) * 0.004;
     const offsetX = (this.simulatedHandX - 0.5) * 0.34;
     const offsetY = (this.simulatedHandY - 0.5) * 0.24;
@@ -1759,6 +1878,7 @@ export class HandTrackerOverlay {
       };
     }
 
+    const curlFactor = clamp((0.35 - otherS) / 0.35, 0, 1);
     const fingerConfigs = [
       {baseIdx: 9, xOff: 0.01, yLen: -0.28 - otherS * 0.22},
       {baseIdx: 13, xOff: 0.065, yLen: -0.25 - otherS * 0.19},
@@ -1767,9 +1887,10 @@ export class HandTrackerOverlay {
     for (const cfg of fingerConfigs) {
       for (let j = 0; j < 4; j++) {
         const f = indexFracs[j];
+        const tipFold = j >= 2 ? curlFactor * 0.16 * (j - 1) : 0;
         pts[cfg.baseIdx + j] = {
           x: wrist.x + cfg.xOff + f * cfg.xOff * 0.35,
-          y: wrist.y + cfg.yLen * f,
+          y: wrist.y + cfg.yLen * f + tipFold,
           z: 0,
         };
       }

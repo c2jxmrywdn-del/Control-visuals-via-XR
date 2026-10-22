@@ -20,6 +20,9 @@ import {
   evaluateSphericalHarmonicsRadiance,
   compute2DGaussianSplatCovariance,
   evaluateGaussianSplatKernel2D,
+  computeBloomForceFieldDamping,
+  stepForceFieldDampedParticle,
+  evaluateDetailedBloomKinematics,
   type Point3D,
 } from './gestureMath.ts';
 
@@ -370,9 +373,11 @@ test('Pinch-grab gesture locks open bloom for stamen visibility and rotates flow
   );
 });
 
-test('FLOWER_LIBRARY and ENVIRONMENT_LIBRARY contain complete 8-class botanical configs with wide stamen visibility limits', () => {
+test('FLOWER_LIBRARY and ENVIRONMENT_LIBRARY contain complete 8-class botanical configs and 2 translucent-white scenes', () => {
   assert.equal(FLOWER_LIBRARY.length, 8);
-  assert.ok(ENVIRONMENT_LIBRARY.length >= 4);
+  assert.equal(ENVIRONMENT_LIBRARY.length, 2);
+  assert.equal(ENVIRONMENT_LIBRARY[0].id, 'translucent-white');
+  assert.equal(ENVIRONMENT_LIBRARY[1].id, 'warm-living-room');
   for (const flower of FLOWER_LIBRARY) {
     assert.ok(flower.outerPetals >= 3);
     assert.ok(
@@ -491,5 +496,94 @@ test('3D Gaussian Splatting (3DGS) EWA covariance projection, Gaussian kernel, a
     'Spherical Harmonics + epidermal velvet Fresnel boosts subsurface radiance at grazing angles',
   );
 });
+
+test('Force-field damping system prevents particle splashing and overflow at extreme interaction speeds', () => {
+  const calmDamping = computeBloomForceFieldDamping(0.8, 0.05, 0.02, 0);
+  const fastDamping = computeBloomForceFieldDamping(0.8, 8.5, 4.2, 0.9);
+
+  assert.equal(calmDamping.isHighSpeedDampingActive, false);
+  assert.equal(fastDamping.isHighSpeedDampingActive, true);
+  assert.ok(
+    fastDamping.viscousDragFactor < calmDamping.viscousDragFactor,
+    'High interaction speed must increase viscous drag (lower drag multiplier per frame)',
+  );
+  assert.ok(
+    fastDamping.centripetalStiffness > calmDamping.centripetalStiffness * 2,
+    'High interaction speed must strongly stiffen centripetal containment force field',
+  );
+  assert.ok(
+    fastDamping.splatKineticCompression < 0.9,
+    'High interaction speed must compress 3DGS covariance footprint to prevent splat splashing',
+  );
+
+  // Inject an extreme outward velocity spike (e.g. 12 m/s outward) and verify strict containment
+  let particle = {
+    x: 0.08,
+    y: 0.07,
+    z: 0.08,
+    vx: 12.0,
+    vy: 8.5,
+    vz: -9.0,
+  };
+  const maxRadius = 0.095;
+  for (let step = 0; step < 60; step++) {
+    particle = stepForceFieldDampedParticle(particle, {
+      centerX: 0,
+      centerY: 0,
+      centerZ: 0,
+      targetOrbitRadius: 0.048,
+      maxRadius,
+      minY: 0.032,
+      maxY: 0.145,
+      swirlSpeed: 0.035,
+      updraftSpeed: 0.022,
+      phase: 1.2,
+      elapsedSec: step * (1 / 60),
+      dt: 1 / 60,
+      damping: fastDamping,
+    });
+    const r = Math.hypot(particle.x, particle.z);
+    const speed = Math.hypot(particle.vx, particle.vy, particle.vz);
+    assert.ok(
+      r <= maxRadius + 1e-5,
+      `Step ${step}: particle radial distance ${r} must never overflow maxRadius ${maxRadius}`,
+    );
+    assert.ok(
+      particle.y >= 0.032 - 1e-5 && particle.y <= 0.145 + 1e-5,
+      `Step ${step}: particle height ${particle.y} must remain strictly inside vertical bounds`,
+    );
+    assert.ok(
+      speed <= fastDamping.maxParticleSpeed * 1.35 + 1e-4,
+      `Step ${step}: particle speed ${speed} must be governed by force-field tanh damper`,
+    );
+  }
+});
+
+test('evaluateDetailedBloomKinematics models 5 progressive botanical anthesis stages and tip uncurling', () => {
+  const s0 = evaluateDetailedBloomKinematics(0.05, 0);
+  const s1 = evaluateDetailedBloomKinematics(0.24, 0);
+  const s2 = evaluateDetailedBloomKinematics(0.5, 0);
+  const s3 = evaluateDetailedBloomKinematics(0.74, 0);
+  const s4 = evaluateDetailedBloomKinematics(0.95, 0);
+
+  assert.equal(s0.stageIndex, 0);
+  assert.equal(s1.stageIndex, 1);
+  assert.equal(s2.stageIndex, 2);
+  assert.equal(s3.stageIndex, 3);
+  assert.equal(s4.stageIndex, 4);
+
+  assert.ok(
+    s0.tipUncurlFactor < 0 && s4.tipUncurlFactor > 0.85,
+    'Petal tips must transition from inward bud fold (< 0) to full outward uncurl (> 0.85)',
+  );
+  assert.ok(
+    s0.marginRuffleExpansion < s2.marginRuffleExpansion &&
+      s2.marginRuffleExpansion < s4.marginRuffleExpansion,
+    'Marginal petal ruffles must expand monotonically as the flower blooms',
+  );
+  assert.equal(s0.antherDehiscenceGlow, 0);
+  assert.ok(s4.antherDehiscenceGlow > 0.85);
+});
+
 
 

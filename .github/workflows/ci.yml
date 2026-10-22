@@ -1,0 +1,35 @@
+name: FLORA CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript type check
+        run: npm run lint
+
+      - name: Lint Firestore security rules
+        run: npx eslint firestore.rules
+
+      - name: Run unit and security rule tests
+        run: npx tsx --test src/flora/gestureMath.test.ts src/flora/firestore.rules.test.ts
+
+      - name: Build production bundle
+        run: npm run build

@@ -1,74 +1,86 @@
 # FLORA — 多纲目植物图谱 · 智能多情境手势 3D 实验室
 **FLORA Botanical Studio: Articulated 3D Gaussian Splatting, ML Hand-Gesture Kinematics & Firebase Cloud Presets**
 
-FLORA 是一个融合 **铰接式 3D 高斯泼溅（Articulated 3D Gaussian Splatting）**、**次表面天鹅绒散射着色器（UE5 Subsurface Velvet + SH Degree-2 Radiance）**、**MediaPipe 实时机器学习手势识别** 以及 **Firebase 云端花谱同步** 的交互式 3D 植物形态学实验室。用户可通过摄像头手势或触控/鼠标，自然流畅地控制 8 大植物纲目从紧闭花苞（Bud, `0%`）到完全盛放（Full Bloom, `100%`）的连续生物力学绽放过程，以及整株 360° 全向空间旋转。
+FLORA 是一个融合 **铰接式 3D 高斯泼溅（Articulated 3D Gaussian Splatting）**、**次表面天鹅绒散射着色器（UE5 Subsurface Velvet + SH Degree-2 Radiance）**、**MediaPipe 实时机器学习手势识别** 以及 **Firebase 云端花谱同步** 的交互式 3D 植物形态学实验室。用户可通过摄像头手势、实测手势视频或触控/鼠标，自然流畅地控制 8 大植物纲目从紧闭花苞（Closed Bud, `0%`）到倾城盛放（Full Bloom, `100%`）的连续生物力学绽放过程，以及整株三维空间（X 俯仰 / Y 水平 / Z 翻滚）360° 全向旋转。
 
 ---
 
 ## 核心特性 (Core Features)
 
 ### 1. 铰接式 3D 高斯泼溅与有机花瓣着色 (Articulated 3DGS & Organic Subsurface Shading)
-- **三种实时渲染管线 (`SplatRenderMode`)**：
-  - `hybrid-3dgs`（混合高保真模式）：结合具有真实双面法线凹凸、主/次级分叉叶脉纹理（Vascular Venation）的有机花瓣网格与 ~9,000 个铰接式各向异性 3D 高斯微粒。
-  - `pure-3dgs`（纯 3DGS 辐射场模式）：隐藏三角网格，纯粹通过 2D 协方差投影（2D Covariance Splat Projection）与球谐函数（SH Degree-2）渲染体积光场。
-  - `pbr-mesh`（次表面丝绒网格模式）：展现植物标本级的叶脉肌理、内腔环境光遮蔽（Cavity AO）与天鹅绒边缘散射（Epidermal Velvet Sheen）。
-- **防过曝影棚级布光与高光压缩**：
-  - 针对娇嫩花瓣校准的 ACES Filmic 曝光（`toneMappingExposure = 0.82`）与柔和光比，配合着色器内的软膝高光压缩（Soft-knee Highlight Compression）与深层花萼内腔遮蔽（`0.42..1.0`），确保高光区域依然清晰呈现丝绸般的花脉与表皮细胞微凹凸细节。
-- **自然生物力学与微风呼吸感**：
-  - 黄金角螺旋（`137.50776°`）花序排布、S 型非对称自然卷曲、花瓣边缘波浪褶皱（Ruffle），以及多频段正弦微风摇曳（Per-petal Organic Wind Sway）。
+- **三种实时渲染管线 (`GaussianSplatMode`)**：
+  - `hybrid-3dgs`（3DGS 实景：混合）：结合具有真实双面法线微凹凸、主/次级分叉叶脉纹理（Vascular Venation）的次表面植物网格与铰接式各向异性 3D 高斯辐射场微粒。
+  - `pure-3dgs`（3DGS 实景：纯泼溅）：隐藏三角网格，纯粹通过 2D 协方差椭球投影（EWA Splatting Covariance Projection）与球谐函数（SH Degree-2）渲染体积光场。
+  - `pbr-mesh`（3DGS 实景：仅网格）：展现植物标本级的叶脉肌理、内腔环境光遮蔽（Cavity AO）与天鹅绒边缘散射（Epidermal Velvet Sheen）。
+- **防过曝影棚级布光与软膝高光压缩**：
+  - 针对娇嫩花瓣校准的 ACES Filmic 曝光（`toneMappingExposure = 0.82`）与柔和光比，配合着色器内的软膝高光压缩（`directDiffuse /= (1.0 + directDiffuse * 0.36)`）与深层花萼内腔遮蔽（`0.42..1.0`），确保高光区域依然清晰呈现丝绸般的花脉与表皮细胞微凹凸细节。
+- **严格不穿模包络与自然呼吸感**：
+  - 黄金角螺旋（`137.50776°`）花序排布、S 型非对称自然卷曲、花瓣边缘波浪褶皱（Ruffle）、严格嵌套的无穿模花壳包络（`computeFloralShellEnvelope`），以及多频段正弦微风摇曳。
 
 ### 2. 机器学习多情境手势控制 (ML Hand-Gesture Recognition & Kinematics)
-- **MediaPipe Hands 21 关键点实时推理 + 9 分类神经姿态识别**：
-  - 识别 `OPEN_BLOOM`（五指张开盛放）、`PINCH_BUD`（捏合合拢成苞）、`PEACE_NEXT_SPECIES`（V 字手势切换植物纲目）、`THREE_FINGER_ENV`（三指切换生态光场）、`THUMBS_UP_FAVORITE`（点赞收藏姿态）、`POINT_INTERACT`（单指自由引蝶/拨动）等手势。
-- **1€ 自适应低通滤波器 (1-Euro Filter)**：
-  - 对手腕旋转、手掌中心位置与花朵开合度进行低延迟防抖滤波，消除摄像头采样抖动与僵硬跳变。
-- **无冲突双模式手势映射**：
-  - **手掌开合距离 (`bloomOpenness`)** 独立控制花苞合拢至完全盛开（`0% ~ 100%`）。
-  - **手掌空间移动与手腕翻转 (`targetRotationX / Y / Z`)** 独立控制整株植物（包含花冠、花萼、花茎、叶片）的 3 轴连续自由旋转，互不干扰。
+- **MediaPipe 21 关键点 3D 骨骼追踪 + 9 类神经手势分类 (`HandPoseLabel`)**：
+  - `open-palm`：五指全张 · 倾城盛放 (`100%`)
+  - `closed-fist`：握拳收拢 · 含苞待放 (`0%`)
+  - `pinch-caliper`：双指卡尺 · 精准收拢成苞
+  - `pinch-spread`：五指张合 · 连续控制花冠绽放度 (`0% ~ 100%`)
+  - `pinch-grab`：OK 捏合抓取 · 锁定花姿并自由旋转整株 `(X/Y/Z)` 三轴角度
+  - `pointing`：单指悬停指令 · 切换下一株植物品种
+  - `victory`：双指 V 字指令 · 切换动态生态光场
+  - `thumb-up`：竖起拇指 · 锁定鉴赏姿态
+  - `finger-count`：多指伸展分级绽放控制
+- **1€ 自适应卡尔曼低通滤波 (`HandSignalDenoiser`)**：
+  - 支持「灵敏度校准 (`10% ~ 100%`)」与「强降噪滤波」，消除摄像头高频采样抖动。
+- **三种防误触交互策略 (`InteractionLogicMode`)**：
+  - `smart-context`（智能多情境）：张合控花、捏合转轴、单指/挥手换花自动协同。
+  - `bloom-orbit-only`（锁定品种·仅控花与轴）：屏蔽换花手势，专注控制当前花朵开合与三轴旋转。
+  - `dual-hand-split`（双手严格分工）：主手控制开花与旋转，仅当副手入镜挥动时切换花朵。
 
-### 3. 八大植物纲目图谱 (8 Botanical Classes & Morphologies)
-| 纲目 ID | 中文名称 | 学名 | 形态学结构 (`Morphology`) |
-| :--- | :--- | :--- | :--- |
-| `nymphaea` | 睡莲纲 · 圣洁莲 | *Nelumbo nucifera* | `cup-lotus`（碗状多层渐开花冠 + 金黄莲蓬雄蕊群） |
-| `magnoliids` | 木兰类 · 玉堂春 | *Magnolia denudata* | `stellate-magnolia`（高挑厚瓣杯状玉兰） |
-| `monocots` | 单子叶 · 幽谷兰 | *Phalaenopsis aphrodite* | `zygomorphic-orchid`（两侧对称唇瓣 + 3 萼片 + 2 侧花瓣） |
-| `eudicots-ranunculales` | 毛茛目 · 洛阳红 | *Paeonia suffruticosa* | `ruffled-peony`（60 瓣繁复层叠波浪褶皱花冠） |
-| `rosids` | 蔷薇类 · 大马士革 | *Rosa damascena* | `spiral-rose`（高密度螺旋包裹卷边花心） |
-| `asterids` | 菊类 · 蓝星睡莲 | *Nymphaea caerulea* | `ray-composite`（放射状星芒尖瓣） |
-| `caryophyllales` | 石竹目 · 仙人指 | *Epiphyllum oxypetalum* | `tubular-epiphyllum`（修长月光白重瓣昙花） |
-| `proteales` | 山龙眼目 · 帝王花 | *Protea cynaroides* | `bract-protea`（天鹅绒苞片皇冠 + 密集丝状花蕊球） |
+### 3. 八大植物纲目图谱 (`FLOWER_LIBRARY`)
+| 序号 | 品种 ID (`id`) | 中文名称 | 学名 (`binomial`) | 植物学分类 (`classZh`) | 形态学结构 (`morphology`) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `01 / 08` | `lotus` | 九品粉莲 | *Nelumbo nucifera* | 基部双子叶纲 · 山龙眼目 · 莲科 | `lotus-pod`（蜂窝状莲蓬与舟形粉白莲瓣） |
+| `02 / 08` | `peony` | 洛阳魏紫牡丹 | *Paeonia suffruticosa* | 核心双子叶纲 · 虎耳草目 · 芍药科 | `peony-ruffled`（千叶重瓣冠冕与柔波花缘） |
+| `03 / 08` | `orchid` | 紫霞蝴蝶兰 | *Phalaenopsis aphrodite* | 单子叶植物纲 · 天门冬目 · 兰科 | `orchid-zygomorphic`（两侧对称蝶翼侧瓣与丝绒唇瓣） |
+| `04 / 08` | `lily` | 星光金脉百合 | *Lilium orientalis* | 单子叶植物纲 · 百合目 · 百合科 | `lily-recurved`（三基数六出反卷星瓣与丁字花药） |
+| `05 / 08` | `sunflower` | 曜金向日葵 | *Helianthus annuus* | 菊类双子叶纲 · 菊目 · 菊科 | `sunflower-capitulum`（斐波那契螺旋管状花盘与金黄舌状花） |
+| `06 / 08` | `iris` | 蓝翼德国鸢尾 | *Iris germanica* | 单子叶植物纲 · 天门冬目 · 鸢尾科 | `iris-bearded`（三枚直立内拱旗瓣与反卷金须垂瓣） |
+| `07 / 08` | `camellia` | 十八学士山茶 | *Camellia japonica* | 菊类双子叶纲 · 杜鹃花目 · 山茶科 | `camellia-fibonacci`（覆瓦状几何玉瓣六重黄金螺旋） |
+| `08 / 08` | `udumbara` | 幽蓝星芒睡莲 | *Nymphaea caerulea luminis* | 基部被子植物群 · 睡莲目 · 睡莲科 | `waterlily-stellate`（星芒花冠与生物微光脉络） |
 
-### 4. 四大动态生态光场 (4 Dynamic Sanctuary Environments)
-- **晨曦温室 (`morning-glasshouse`)**：通透暖阳与体积丁达尔光束。
-- **幽暗植物志 (`midnight-botanica`)**：深邃博物学暗调影棚，凸显丝绒边缘光与微距脉络。
-- **黄金时刻 (`golden-hour`)**：琥珀色夕阳逆光，强化花瓣次表面透光感。
-- **迷雾雨林 (`misty-rainforest`)**：清冷青翠雨林漫射光与悬浮孢子微粒。
+### 4. 四大动态生态光场 (`ENVIRONMENT_LIBRARY`)
+- **晨雾禅池 (`zen-pond` / Misty Zen Sanctuary)**：温润晨光与水面涟漪。
+- **月华流萤 (`moon-garden` / Moonlit Firefly Courtyard)**：清冷月色与流萤微光。
+- **落日暖房 (`golden-solarium` / Amber Dusk Conservatory)**：琥珀暮光与逆光金尘。
+- **翡翠植物志 (`botanical-atelier` / Emerald Herbarium Studio)**：博物馆级林间散射光。
 
 ### 5. Firebase 云端花谱与安全规则 (Firebase Cloud Presets & Zero-Trust Security)
-- 集成 **Firebase Authentication (Google 登录)** 与 **Cloud Firestore**。
-- 支持一键保存当前花朵品种、绽放开合度、生态光场、高斯渲染模式及整株三维空间姿态至云端，或设为公开社区花谱供所有访客加载体验。
-- 配备通过 `@firebase/rules-unit-testing` 与 `eslint-plugin-firestore-rules` 验证的零信任安全规则（`firestore.rules`）。
+- 集成 **Firebase Authentication (Google 账号登录)** 与 **Cloud Firestore**（顶部工具栏 `☁️ 云端花谱`）。
+- 支持将当前花朵品种、花冠绽放度、生态光场、3DGS 渲染模式及三维空间姿态角 (`X/Y/Z`) 一键保存至云端、随时加载恢复或归档。
+- 配备通过 `@firebase/eslint-plugin-security-rules` 静态检查与 14 项正反例单元测试验证的零信任安全规则（`firestore.rules`）。
 
 ---
 
 ## 项目目录结构 (Project Structure)
 
 ```text
+├── index.html                           # 应用 HTML 入口
 ├── src/
-│   ├── main.ts                        # 应用入口与 DOM 挂载
-│   ├── flora/
-│   │   ├── FloraXRScript.ts           # 主场景控制器、3D 相机、手势与整株旋转运动学循环
-│   │   ├── FlowerModels.ts            # 8 大植物程序化几何、叶脉纹理、法线生成与次表面着色器
-│   │   ├── GaussianSplatFlora.ts      # 铰接式 3D 高斯泼溅生成器与 SH Degree-2 球谐着色器
-│   │   ├── EnvironmentManager.ts      # 4 大生态光场、防过曝影棚布光与大气悬浮微粒
-│   │   ├── HandTrackerOverlay.ts      # MediaPipe 手势识别、HUD 控制面板与云端花谱抽屉 UI
-│   │   ├── gestureMath.ts             # 纯函数手势特征提取、9 分类推理与 1€ 滤波器
-│   │   ├── firebaseClient.ts          # Firebase Auth 与 Firestore 云端花谱 CRUD 客户端
-│   │   ├── gestureMath.test.ts        # 手势数学与运动学单元测试
-│   │   └── firestore.rules.test.ts    # Firestore 安全规则模拟器单元测试
-├── firestore.rules                    # 零信任 Firestore 安全规则
-├── firebase-blueprint.json            # Firestore 数据结构蓝图
-├── security_spec.md                   # 安全规则架构规范说明
+│   ├── index.ts                         # XRBlocks 与 FLORA 3D 工作室启动入口
+│   ├── index.css                        # 全局 HUD 界面与响应式样式
+│   └── flora/
+│       ├── FloraXRScript.ts             # 主场景控制器、弹簧阻尼运动学、跨品种渐变与整株三轴旋转
+│       ├── FlowerModels.ts              # 8 大植物程序化几何、分叉叶脉纹理、法线生成、次表面着色器与铰接式 3DGS
+│       ├── EnvironmentManager.ts        # 4 大生态光场、防过曝影棚布光与大气悬浮粒子
+│       ├── HandTrackerOverlay.ts        # MediaPipe 手势识别、HUD 控制面板、视频演练与 Firebase 云端花谱抽屉
+│       ├── gestureMath.ts               # 纯函数手势特征提取、9 分类神经推理、1€ 滤波、花壳防穿模包络与 3DGS 数学核
+│       ├── firebaseClient.ts            # Firebase Auth (Google Popup) 与 Firestore 云端花谱 CRUD 客户端
+│       ├── gestureMath.test.ts          # 手势数学、防穿模包络与 3DGS 单元测试
+│       └── firestore.rules.test.ts      # Firestore 安全规则 "Dirty Dozen" 攻防单元测试
+├── firestore.rules                      # 零信任 Firestore 安全规则
+├── firebase-blueprint.json              # Firestore 实体与路径架构蓝图
+├── firebase-applet-config.json          # Firebase Web 应用配置
+├── security_spec.md                     # 安全规则不变量与攻防测试规范
+├── eslint.config.js                     # Firestore 安全规则 ESLint 配置
 └── package.json
 ```
 
@@ -87,15 +99,18 @@ npm run dev
 ```
 启动后在浏览器访问 `http://localhost:3000`。
 
-### 3. 运行单元测试与安全规则检查
+### 3. 运行类型检查、安全规则检查与单元测试
 ```bash
-# 运行手势运动学与 Firestore 安全规则测试
-npx tsx --test src/flora/gestureMath.test.ts src/flora/firestore.rules.test.ts
+# 1. TypeScript 严格类型检查
+npm run lint
 
-# 静态检查 Firestore 安全规则
+# 2. Firestore 安全规则静态检查
 npx eslint firestore.rules
 
-# 生产环境类型检查与构建
+# 3. 运行手势运动学、3DGS 与 Firestore 安全规则单元测试
+npx tsx --test src/flora/gestureMath.test.ts src/flora/firestore.rules.test.ts
+
+# 4. 构建生产环境代码包
 npm run build
 ```
 
@@ -109,12 +124,10 @@ npm run build
 3. 点击确认即可将完整项目代码与提交历史直接推送到你的 GitHub 仓库。
 
 ### 方式二：使用 Git 命令行推送
-本地 Git 仓库已初始化并完成提交。如果你在本地终端或配置了 Personal Access Token / SSH Key 的环境中，只需绑定你的远程 GitHub 仓库地址并推送：
+本地 Git 仓库已初始化并完成提交。若在本地终端或已配置 GitHub 凭据的环境中，可执行：
 
 ```bash
-# 1. 在 GitHub 上新建一个空仓库（例如 https://github.com/<你的用户名>/flora-3dgs-studio.git）
-# 2. 绑定远程仓库并推送 main 分支
-git remote add origin https://github.com/<你的用户名>/flora-3dgs-studio.git
+git remote add origin https://github.com/<你的GitHub用户名>/<你的仓库名>.git
 git branch -M main
 git push -u origin main
 ```
