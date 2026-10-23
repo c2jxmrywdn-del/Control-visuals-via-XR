@@ -24,6 +24,8 @@ import {
   computeBloomForceFieldDamping,
   stepForceFieldDampedParticle,
   evaluateDetailedBloomKinematics,
+  computeFlowerEnvironmentLightingProfile,
+  interpolateFlowerLightingProfiles,
   type Point3D,
 } from './gestureMath.ts';
 
@@ -374,11 +376,13 @@ test('Pinch-grab gesture locks open bloom for stamen visibility and rotates flow
   );
 });
 
-test('FLOWER_LIBRARY and ENVIRONMENT_LIBRARY contain complete 8-class botanical configs and 2 translucent-white scenes', () => {
+test('FLOWER_LIBRARY and ENVIRONMENT_LIBRARY contain complete 8-class botanical configs and 4 themed environments (Studio, Living Room, Emerald Forest, Golden Desert)', () => {
   assert.equal(FLOWER_LIBRARY.length, 8);
-  assert.equal(ENVIRONMENT_LIBRARY.length, 2);
+  assert.equal(ENVIRONMENT_LIBRARY.length, 4);
   assert.equal(ENVIRONMENT_LIBRARY[0].id, 'translucent-white');
   assert.equal(ENVIRONMENT_LIBRARY[1].id, 'warm-living-room');
+  assert.equal(ENVIRONMENT_LIBRARY[2].id, 'emerald-forest');
+  assert.equal(ENVIRONMENT_LIBRARY[3].id, 'golden-desert');
   for (const flower of FLOWER_LIBRARY) {
     assert.ok(flower.outerPetals >= 3);
     assert.ok(
@@ -743,3 +747,64 @@ test('Sunflower capitulum specification uses 2 non-overlapping staggered rings o
     'Heliotropic-reflex mode must fan stamens wider into a radiant solar corona',
   );
 });
+
+test('computeFlowerEnvironmentLightingProfile and interpolateFlowerLightingProfiles differentiate Forest, Desert, Studio, and Living Room color expression', () => {
+  const studioSpec = ENVIRONMENT_LIBRARY.find((e) => e.id === 'translucent-white')!;
+  const livingSpec = ENVIRONMENT_LIBRARY.find((e) => e.id === 'warm-living-room')!;
+  const forestSpec = ENVIRONMENT_LIBRARY.find((e) => e.id === 'emerald-forest')!;
+  const desertSpec = ENVIRONMENT_LIBRARY.find((e) => e.id === 'golden-desert')!;
+
+  const studio = computeFlowerEnvironmentLightingProfile(studioSpec, 0.8);
+  const living = computeFlowerEnvironmentLightingProfile(livingSpec, 0.8);
+  const forest = computeFlowerEnvironmentLightingProfile(forestSpec, 0.8);
+  const desert = computeFlowerEnvironmentLightingProfile(desertSpec, 0.8);
+
+  // Distinct color temperatures: Forest (>6000K cool canopy) > Studio (~5600K) > Living Room (~4300K) > Desert (~3250K warm amber)
+  assert.ok(
+    forest.colorTemperatureKelvin > studio.colorTemperatureKelvin &&
+      studio.colorTemperatureKelvin > living.colorTemperatureKelvin &&
+      living.colorTemperatureKelvin > desert.colorTemperatureKelvin,
+    'Color temperatures must strictly order: Forest > Studio > Living Room > Desert',
+  );
+
+  // Forest must have green-dominant direct/shadow/subsurface tinting and rich chlorophyll boost
+  assert.ok(
+    forest.petalDirectTintRgb[1] > forest.petalDirectTintRgb[0] &&
+      forest.petalShadowTintRgb[1] > forest.petalShadowTintRgb[0],
+    'Emerald Forest lighting must impart green-dominant canopy direct and shadow tints on the flower',
+  );
+  assert.ok(
+    forest.foliageColorShiftRgb[1] > 1.1,
+    'Emerald Forest must enrich foliage chlorophyll green channel',
+  );
+
+  // Desert must have warm amber/gold direct and subsurface tinting (R > G > B) and strongest SSS boost
+  assert.ok(
+    desert.petalDirectTintRgb[0] > desert.petalDirectTintRgb[1] &&
+      desert.petalDirectTintRgb[1] > desert.petalDirectTintRgb[2],
+    'Golden Desert lighting must impart warm amber/gold direct tint (R > G > B) on the flower',
+  );
+  assert.ok(
+    desert.subsurfaceTintRgb[0] >= 1.0 &&
+      desert.subsurfaceStrengthMultiplier > studio.subsurfaceStrengthMultiplier,
+    'Golden Desert low-angle sun must boost warm subsurface transmission through petals',
+  );
+
+  // Smooth interpolation between Forest and Desert
+  const mid = interpolateFlowerLightingProfiles(forest, desert, 0.5);
+  assert.ok(
+    mid.colorTemperatureKelvin < forest.colorTemperatureKelvin &&
+      mid.colorTemperatureKelvin > desert.colorTemperatureKelvin,
+    'Interpolated profile must blend color temperature smoothly',
+  );
+  const keyLen = Math.hypot(
+    mid.splatKeyDir[0],
+    mid.splatKeyDir[1],
+    mid.splatKeyDir[2],
+  );
+  assert.ok(
+    Math.abs(keyLen - 1.0) < 1e-4,
+    `Interpolated splatKeyDir must remain unit-normalized, got length ${keyLen}`,
+  );
+});
+

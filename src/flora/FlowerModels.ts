@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import {
   FLOWER_LIBRARY,
+  ENVIRONMENT_LIBRARY,
   type FlowerSpec,
   type FloralShellEnvelope,
   type GaussianSplatMode,
   type BloomKinematicsStyle,
   type BloomForceFieldState,
   type ForceFieldParticleState,
+  type FlowerEnvironmentLightingProfile,
   clamp,
   computeFloralShellEnvelope,
   evaluateOrganPitchAtBloom,
@@ -15,6 +17,7 @@ import {
   computeBloomForceFieldDamping,
   stepForceFieldDampedParticle,
   evaluateDetailedBloomKinematics,
+  computeFlowerEnvironmentLightingProfile,
 } from './gestureMath';
 
 interface PetalPivotData {
@@ -70,6 +73,13 @@ interface AnimatedShaderUniforms {
   uBloom: {value: number};
   uTipUncurl: {value: number};
   uKineticContainment: {value: number};
+  uEnvDirectTint?: {value: THREE.Vector3};
+  uEnvShadowTint?: {value: THREE.Vector3};
+  uEnvSubsurfaceTint?: {value: THREE.Vector3};
+  uEnvSubsurfaceBoost?: {value: number};
+  uEnvRimSheenTint?: {value: THREE.Vector3};
+  uEnvKeyDir?: {value: THREE.Vector3};
+  uEnvRadianceTint?: {value: THREE.Vector3};
 }
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // ~2.3999632 rad (137.508 deg)
@@ -316,13 +326,18 @@ function applyUE5FoliageSubsurfaceShader(
     uBloom: {value: 0.78},
     uTipUncurl: {value: 0.56},
     uKineticContainment: {value: 1.0},
+    uEnvDirectTint: {value: new THREE.Vector3(1, 1, 1)},
+    uEnvShadowTint: {value: new THREE.Vector3(1, 1, 1)},
+    uEnvSubsurfaceTint: {value: new THREE.Vector3(1, 1, 1)},
+    uEnvSubsurfaceBoost: {value: 1.0},
+    uEnvRimSheenTint: {value: new THREE.Vector3(1, 1, 1)},
   };
   if (uniformRegistry) {
     uniformRegistry.push(sharedUniforms);
   }
 
   material.customProgramCacheKey = () =>
-    `ue5_3dgs_velvet_sss_v16_${subsurfaceColorHex}_${sssStrength.toFixed(2)}_${windAmplitude.toFixed(4)}`;
+    `ue5_3dgs_velvet_sss_v17_env_${subsurfaceColorHex}_${sssStrength.toFixed(2)}_${windAmplitude.toFixed(4)}`;
 
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uSubsurfaceColor = {value: sssColor};
@@ -331,6 +346,11 @@ function applyUE5FoliageSubsurfaceShader(
     shader.uniforms.uBloom = sharedUniforms.uBloom;
     shader.uniforms.uTipUncurl = sharedUniforms.uTipUncurl;
     shader.uniforms.uKineticContainment = sharedUniforms.uKineticContainment;
+    shader.uniforms.uEnvDirectTint = sharedUniforms.uEnvDirectTint!;
+    shader.uniforms.uEnvShadowTint = sharedUniforms.uEnvShadowTint!;
+    shader.uniforms.uEnvSubsurfaceTint = sharedUniforms.uEnvSubsurfaceTint!;
+    shader.uniforms.uEnvSubsurfaceBoost = sharedUniforms.uEnvSubsurfaceBoost!;
+    shader.uniforms.uEnvRimSheenTint = sharedUniforms.uEnvRimSheenTint!;
     shader.uniforms.uWindAmp = {value: windAmplitude};
 
     shader.vertexShader = shader.vertexShader.replace(
@@ -388,20 +408,26 @@ function applyUE5FoliageSubsurfaceShader(
       `#include <common>
       uniform vec3 uSubsurfaceColor;
       uniform float uSubsurfaceStrength;
-      uniform float uBloom;`,
+      uniform float uBloom;
+      uniform vec3 uEnvDirectTint;
+      uniform vec3 uEnvShadowTint;
+      uniform vec3 uEnvSubsurfaceTint;
+      uniform float uEnvSubsurfaceBoost;
+      uniform vec3 uEnvRimSheenTint;`,
     );
 
-    // Rich inner-chalice pigment depth (gives unmistakable 3D separation between petal tiers without mud)
+    // Rich inner-chalice pigment depth modulated by active environment shadow & subsurface tone
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <color_fragment>',
       `#if defined( USE_COLOR_ALPHA ) || defined( USE_COLOR )
         float cavityAO = clamp( vColor.r, 0.42, 1.0 );
-        vec3 deepChaliceTint = mix( uSubsurfaceColor * 0.48 + diffuseColor.rgb * 0.26, vec3( 1.0 ), cavityAO );
+        vec3 envCavityColor = ( uSubsurfaceColor * uEnvSubsurfaceTint ) * 0.46 + ( diffuseColor.rgb * uEnvShadowTint ) * 0.28;
+        vec3 deepChaliceTint = mix( envCavityColor, vec3( 1.0 ), cavityAO );
         diffuseColor.rgb *= deepChaliceTint;
       #endif`,
     );
 
-    // Continuous 3DGS Spherical Harmonics (SH Degree 2) + Highlight-Protected Subsurface Velvet
+    // Continuous 3DGS Spherical Harmonics (SH Degree 2) + Environment-Matched Subsurface Velvet
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <lights_fragment_end>',
       `#include <lights_fragment_end>
@@ -411,24 +437,27 @@ function applyUE5FoliageSubsurfaceShader(
         vec3 ue5ViewDir = normalize( vViewPosition );
         float ndotv = clamp( abs( dot( normal, ue5ViewDir ) ), 0.0, 1.0 );
 
-        // 1. Softly compress intense direct highlights so fine vascular veins & normal relief NEVER wash out
-        reflectedLight.directDiffuse = reflectedLight.directDiffuse / ( vec3( 1.0 ) + reflectedLight.directDiffuse * 0.36 );
+        // 1. Apply environment direct sunlight color-grading & softly compress highlights to preserve vascular vein relief
+        reflectedLight.directDiffuse *= uEnvDirectTint;
+        reflectedLight.directDiffuse = reflectedLight.directDiffuse / ( vec3( 1.0 ) + reflectedLight.directDiffuse * 0.34 );
+        reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), uEnvShadowTint, 0.82 );
 
-        // 2. Lift only the deepest unlit shadow crevices with rich, saturated subsurface pigment (no flat wash!)
+        // 2. Lift unlit shadow crevices with environment-harmonized subsurface pigment (e.g. emerald canopy or desert amber)
         float directLum = dot( reflectedLight.directDiffuse, vec3( 0.299, 0.587, 0.114 ) );
         float shadowMask = clamp( 1.0 - directLum * 1.65, 0.0, 1.0 );
-        vec3 shadowSubsurfaceWarmth = diffuseColor.rgb * uSubsurfaceColor * ( 0.22 * shadowMask * ue5Translucency );
+        vec3 envSubsurfaceCol = clamp( mix( uSubsurfaceColor, uEnvSubsurfaceTint, 0.42 ) * uEnvSubsurfaceTint, 0.0, 1.45 );
+        vec3 shadowSubsurfaceWarmth = mix( diffuseColor.rgb, uEnvShadowTint, 0.32 ) * envSubsurfaceCol * ( 0.25 * shadowMask * ue5Translucency * uEnvSubsurfaceBoost );
 
         // 3. 3D Gaussian Splatting Spherical Harmonics (SH Degree 1 & 2) grazing translucency
         float shY1 = 0.4886 * ( ue5ViewDir.y * 0.45 + ue5ViewDir.z * 0.35 - ue5ViewDir.x * 0.25 );
         float shY2 = 0.3154 * ( 3.0 * ue5ViewDir.z * ue5ViewDir.z - 1.0 ) * 0.22;
         float ue5RimScatter = pow( 1.0 - ndotv, 1.85 );
-        float ue5VelvetGrazing = pow( 1.0 - ndotv, 2.75 );
+        float ue5VelvetGrazing = pow( 1.0 - ndotv, 2.55 );
 
-        vec3 sssContribution = mix( diffuseColor.rgb, uSubsurfaceColor, 0.42 ) * ue5Translucency * ( 0.18 * shadowMask + 0.42 * ue5RimScatter + 0.12 * ( shY1 + shY2 ) ) * uSubsurfaceStrength;
+        vec3 sssContribution = mix( diffuseColor.rgb, envSubsurfaceCol, 0.52 ) * ue5Translucency * ( 0.20 * shadowMask + 0.46 * ue5RimScatter + 0.12 * ( shY1 + shY2 ) ) * ( uSubsurfaceStrength * uEnvSubsurfaceBoost );
 
-        // 4. Delicate silk-velvet contour rim along curved 3D petal edges
-        vec3 velvetSheen = mix( diffuseColor.rgb, uSubsurfaceColor, 0.35 ) * ue5VelvetGrazing * 0.14 * ( 0.3 + 0.7 * ue5TipProgress );
+        // 4. Delicate silk-velvet contour rim tinted by environment rim/sky glow
+        vec3 velvetSheen = mix( diffuseColor.rgb, uEnvRimSheenTint, 0.58 ) * uEnvRimSheenTint * ue5VelvetGrazing * 0.22 * ( 0.3 + 0.7 * ue5TipProgress );
         reflectedLight.indirectDiffuse += shadowSubsurfaceWarmth + sssContribution + velvetSheen;
 
         // 5. Suppress plastic specular hotspots while keeping subtle micro-vein normal glint
@@ -1205,6 +1234,20 @@ export class ProceduralFlowerModel extends THREE.Group {
   private readonly dewdropItems: DewdropItemData[] = [];
   private readonly pollenMotes: PollenMoteData[] = [];
   private readonly antherMaterials: THREE.MeshPhysicalMaterial[] = [];
+  private readonly foliageMaterials: Array<{
+    mat: THREE.MeshPhysicalMaterial;
+    baseColor: THREE.Color;
+    baseSheenColor: THREE.Color;
+  }> = [];
+  private readonly corollaMaterials: Array<{
+    mat: THREE.MeshPhysicalMaterial;
+    baseSheenColor: THREE.Color;
+    baseSheen: number;
+  }> = [];
+  private dewdropMaterial: THREE.MeshPhysicalMaterial | null = null;
+  private readonly baseCoreGlowColor: THREE.Color;
+  private currentLightingProfile: FlowerEnvironmentLightingProfile =
+    computeFlowerEnvironmentLightingProfile(ENVIRONMENT_LIBRARY[0], 0.78);
   private readonly animatedShaderUniforms: AnimatedShaderUniforms[] = [];
   private readonly meshMaterialsForMode: THREE.MeshPhysicalMaterial[] = [];
   private readonly materialsToDispose: THREE.Material[] = [];
@@ -1226,6 +1269,7 @@ export class ProceduralFlowerModel extends THREE.Group {
     super();
     this.spec = spec;
     this.name = `Flower_${spec.id}`;
+    this.baseCoreGlowColor = new THREE.Color(spec.coreColor);
 
     this.scale.setScalar(1.38);
 
@@ -1247,7 +1291,107 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.buildFloatingPollenHalo();
     this.buildArticulated3DGaussianSplatField();
     this.setGaussianSplatMode('hybrid-3dgs');
+    this.applyEnvironmentLighting(this.currentLightingProfile);
     this.setBloom(0.78, 0);
+  }
+
+  /**
+   * Dynamically updates the 3D flower's shader uniforms, subsurface scattering,
+   * foliage chlorophyll tone, velvet rim sheen, dewdrop reflections, and 3DGS radiance field
+   * so that the flower's color expression matches the active environment theme.
+   */
+  applyEnvironmentLighting(profile: FlowerEnvironmentLightingProfile): void {
+    this.currentLightingProfile = profile;
+
+    for (const u of this.animatedShaderUniforms) {
+      if (u.uEnvDirectTint) {
+        u.uEnvDirectTint.value.set(
+          profile.petalDirectTintRgb[0],
+          profile.petalDirectTintRgb[1],
+          profile.petalDirectTintRgb[2],
+        );
+      }
+      if (u.uEnvShadowTint) {
+        u.uEnvShadowTint.value.set(
+          profile.petalShadowTintRgb[0],
+          profile.petalShadowTintRgb[1],
+          profile.petalShadowTintRgb[2],
+        );
+      }
+      if (u.uEnvSubsurfaceTint) {
+        u.uEnvSubsurfaceTint.value.set(
+          profile.subsurfaceTintRgb[0],
+          profile.subsurfaceTintRgb[1],
+          profile.subsurfaceTintRgb[2],
+        );
+      }
+      if (u.uEnvSubsurfaceBoost) {
+        u.uEnvSubsurfaceBoost.value = profile.subsurfaceStrengthMultiplier;
+      }
+      if (u.uEnvRimSheenTint) {
+        u.uEnvRimSheenTint.value.set(
+          profile.velvetSheenTintRgb[0],
+          profile.velvetSheenTintRgb[1],
+          profile.velvetSheenTintRgb[2],
+        );
+      }
+      if (u.uEnvKeyDir) {
+        u.uEnvKeyDir.value.set(
+          profile.splatKeyDir[0],
+          profile.splatKeyDir[1],
+          profile.splatKeyDir[2],
+        );
+      }
+      if (u.uEnvRadianceTint) {
+        u.uEnvRadianceTint.value.set(
+          profile.splatEnvRadianceTintRgb[0],
+          profile.splatEnvRadianceTintRgb[1],
+          profile.splatEnvRadianceTintRgb[2],
+        );
+      }
+    }
+
+    const sheenTint = new THREE.Color(
+      profile.velvetSheenTintRgb[0],
+      profile.velvetSheenTintRgb[1],
+      profile.velvetSheenTintRgb[2],
+    );
+    for (const item of this.corollaMaterials) {
+      item.mat.sheenColor.copy(item.baseSheenColor).multiply(sheenTint);
+      item.mat.sheen = clamp(
+        item.baseSheen * profile.sheenIntensityMultiplier,
+        0.1,
+        1.0,
+      );
+      item.mat.envMapIntensity = 0.72 + profile.environmentReflectionIntensity;
+    }
+
+    const foliageShift = new THREE.Color(
+      profile.foliageColorShiftRgb[0],
+      profile.foliageColorShiftRgb[1],
+      profile.foliageColorShiftRgb[2],
+    );
+    for (const item of this.foliageMaterials) {
+      item.mat.color.copy(item.baseColor).multiply(foliageShift);
+      item.mat.sheenColor.copy(item.baseSheenColor).multiply(sheenTint);
+      item.mat.envMapIntensity = 0.68 + profile.environmentReflectionIntensity;
+    }
+
+    if (this.dewdropMaterial) {
+      this.dewdropMaterial.color.setHex(profile.dewdropSpecularTintHex);
+      this.dewdropMaterial.attenuationColor = new THREE.Color(
+        profile.dewdropSpecularTintHex,
+      );
+    }
+
+    const envCoreColor = new THREE.Color(profile.coreGlowColorHex);
+    this.coreGlowLight.color
+      .copy(this.baseCoreGlowColor)
+      .lerp(envCoreColor, 0.42);
+  }
+
+  getEnvironmentLightingProfile(): FlowerEnvironmentLightingProfile {
+    return this.currentLightingProfile;
   }
 
   setBloomStyle(style: BloomKinematicsStyle): void {
@@ -1340,6 +1484,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.add(stemMesh);
     this.geometriesToDispose.push(stemGeo);
     this.materialsToDispose.push(stemMat);
+    this.foliageMaterials.push({
+      mat: stemMat,
+      baseColor: stemMat.color.clone(),
+      baseSheenColor: stemMat.sheenColor.clone(),
+    });
 
     const rootCollarPoints = [
       new THREE.Vector2(0.0, -0.322),
@@ -1465,6 +1614,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.geometriesToDispose.push(leafGeo, subCalyxLeafGeo, stipuleGeo);
     this.materialsToDispose.push(leafMat);
     this.meshMaterialsForMode.push(leafMat);
+    this.foliageMaterials.push({
+      mat: leafMat,
+      baseColor: leafMat.color.clone(),
+      baseSheenColor: leafMat.sheenColor.clone(),
+    });
 
     // 1. PRECISION FUSED STEM-TO-CALYX RECEPTACLE CUP (花托与花柄无缝精密包覆杯):
     // Extends continuously from the top of the main stem (r = 0.0138m) out to the outer
@@ -1876,6 +2030,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.geometriesToDispose.push(budPetalGeo);
     this.materialsToDispose.push(budPetalMat);
     this.meshMaterialsForMode.push(budPetalMat);
+    this.corollaMaterials.push({
+      mat: budPetalMat,
+      baseSheenColor: budPetalMat.sheenColor.clone(),
+      baseSheen: budPetalMat.sheen,
+    });
 
     // 3 Inner + 5 Outer non-intersecting cupped companion petals
     for (let i = 0; i < 8; i++) {
@@ -2471,6 +2630,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.geometriesToDispose.push(sepalGeo);
     this.materialsToDispose.push(sepalMat);
     this.meshMaterialsForMode.push(sepalMat);
+    this.foliageMaterials.push({
+      mat: sepalMat,
+      baseColor: sepalMat.color.clone(),
+      baseSheenColor: sepalMat.sheenColor.clone(),
+    });
 
     // Calyx Sepals (花萼): Anchored seamlessly inside the green receptacle rim
     // so their broad claws fuse with the receptacle cup and never float or pierce petals!
@@ -2555,6 +2719,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
     this.materialsToDispose.push(petalMaterial);
     this.meshMaterialsForMode.push(petalMaterial);
+    this.corollaMaterials.push({
+      mat: petalMaterial,
+      baseSheenColor: petalMaterial.sheenColor.clone(),
+      baseSheen: petalMaterial.sheen,
+    });
 
     if (morph === 'orchid-zygomorphic') {
       this.buildOrchidCorolla(petalMaterial, normalTex, roughTex);
@@ -2972,6 +3141,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
     this.materialsToDispose.push(lipMat, callusMat);
     this.meshMaterialsForMode.push(lipMat);
+    this.corollaMaterials.push({
+      mat: lipMat,
+      baseSheenColor: lipMat.sheenColor.clone(),
+      baseSheen: lipMat.sheen,
+    });
 
     // 1 Dorsal Sepal (top/back: Math.PI * 1.5) + 2 Lateral Sepals (lower-front left/right: Math.PI * 0.28 & Math.PI * 0.72)
     // Outer orchid whorl: r = 0.050, closedPitch = 0.40
@@ -3269,6 +3443,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       clearcoat: 1.0,
       clearcoatRoughness: 0.02,
     });
+    this.dewdropMaterial = dropMat;
     this.geometriesToDispose.push(dropGeo);
     this.materialsToDispose.push(dropMat);
 
@@ -3688,7 +3863,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       new THREE.InstancedBufferAttribute(aColorSH1, 3),
     );
 
-    const splatUniforms = {
+    const splatUniforms: AnimatedShaderUniforms & Record<string, {value: unknown}> = {
       uBloom: {value: 0.78},
       uTime: {value: 0.0},
       uTipUncurl: {value: 0.56},
@@ -3696,6 +3871,9 @@ export class ProceduralFlowerModel extends THREE.Group {
       uSplatScaleMultiplier: {value: 0.68},
       uSplatOpacityMultiplier: {value: 0.18},
       uPureSplatMode: {value: 0.0},
+      uEnvKeyDir: {value: new THREE.Vector3(0.48, 0.78, 0.38).normalize()},
+      uEnvRadianceTint: {value: new THREE.Vector3(1.0, 1.0, 1.0)},
+      uEnvShadowTint: {value: new THREE.Vector3(1.0, 1.0, 1.0)},
     };
     this.animatedShaderUniforms.push(splatUniforms);
 
@@ -3723,6 +3901,9 @@ export class ProceduralFlowerModel extends THREE.Group {
         uniform float uSplatScaleMultiplier;
         uniform float uSplatOpacityMultiplier;
         uniform float uPureSplatMode;
+        uniform vec3 uEnvKeyDir;
+        uniform vec3 uEnvRadianceTint;
+        uniform vec3 uEnvShadowTint;
 
         varying vec2 vSplatCoord;
         varying vec4 vColorAlpha;
@@ -3767,8 +3948,9 @@ export class ProceduralFlowerModel extends THREE.Group {
           vSplatCoord = position.xy * 2.0;
           vec3 splatOffset = t1 * (position.x * sx * 1.45) + t2 * (position.y * sy * 1.45) + viewNormal * 0.0008;
 
-          vec3 keyDir = normalize(vec3(0.48, 0.78, 0.38));
-          float dirLambert = 0.56 + 0.44 * clamp(dot(viewNormal, keyDir), -0.35, 1.0);
+          vec3 keyDir = normalize(uEnvKeyDir);
+          float rawNdotL = clamp(dot(viewNormal, keyDir), -0.35, 1.0);
+          float dirLambert = 0.56 + 0.44 * rawNdotL;
 
           vec3 viewDir = normalize(-viewCenter);
           float ndotv = abs(dot(viewNormal, viewDir));
@@ -3777,7 +3959,8 @@ export class ProceduralFlowerModel extends THREE.Group {
           float velvetGrazing = pow(1.0 - clamp(ndotv, 0.0, 1.0), 1.85);
           float shMod = clamp(0.14 * (shY1 + shY2) + 0.24 * velvetGrazing, -0.1, 0.36);
 
-          vec3 shRadiance = clamp(aColorSH0.rgb * dirLambert + aColorSH1 * shMod, 0.0, 0.90);
+          vec3 envTint = mix(uEnvShadowTint, uEnvRadianceTint, clamp(rawNdotL * 0.65 + 0.35, 0.0, 1.0));
+          vec3 shRadiance = clamp((aColorSH0.rgb * dirLambert + aColorSH1 * shMod) * envTint, 0.0, 0.94);
           vColorAlpha = vec4(shRadiance, clamp(aColorSH0.a * uSplatOpacityMultiplier, 0.0, 0.88));
 
           gl_Position = projectionMatrix * vec4(viewCenter + splatOffset, 1.0);
@@ -3866,10 +4049,12 @@ export class ProceduralFlowerModel extends THREE.Group {
         Math.cos(elapsedSec * 0.6) * 0.006) *
       damping.splatKineticCompression;
 
+    const coreMult = this.currentLightingProfile.coreGlowIntensityMultiplier;
     this.coreGlowLight.intensity =
-      0.05 +
-      Math.pow(b, 1.1) *
-        (0.06 + 0.018 * Math.sin(elapsedSec * 1.48));
+      (0.05 +
+        Math.pow(b, 1.1) *
+          (0.06 + 0.018 * Math.sin(elapsedSec * 1.48))) *
+      coreMult;
 
     // 1. Main Corolla Petals & Calyx Sepals: Non-intersecting concentric bud-to-bloom interpolation + living breathing
     const kineticDamp = damping.splatKineticCompression;

@@ -418,6 +418,10 @@ export class FloraXRScript extends xb.Script {
       this.activeFlowerModel.rotation.y = 0;
     }
 
+    this.activeFlowerModel.applyEnvironmentLighting(
+      this.environmentManager.getFlowerLightingProfile(),
+    );
+
     // Apply unified 3-axis rotation + gentle living breeze sway to the whole botanical assembly
     // (flower head + buds + stem + leaves + base always move and rotate in 100% unison)
     const breezePitch = Math.sin(elapsedSec * 0.92) * 0.012;
@@ -439,6 +443,7 @@ export class FloraXRScript extends xb.Script {
         this.bloomSpring.value / 100,
         this.bloomSpring.velocity / 100,
       );
+      const envLighting = this.activeFlowerModel?.getEnvironmentLightingProfile();
       return JSON.stringify({
         totalSpeciesCount: FLOWER_LIBRARY.length,
         activeSpeciesId: spec.id,
@@ -447,6 +452,25 @@ export class FloraXRScript extends xb.Script {
         activeSpeciesNameEn: spec.nameEn,
         activeEnvironmentId: env.id,
         activeEnvironmentNameZh: env.nameZh,
+        environmentLighting: envLighting
+          ? {
+              envId: envLighting.envId,
+              themeMoodZh: envLighting.themeMoodZh,
+              colorTemperatureKelvin: Math.round(envLighting.colorTemperatureKelvin),
+              petalDirectTintRgb: envLighting.petalDirectTintRgb.map((v) =>
+                Number(v.toFixed(3)),
+              ),
+              petalShadowTintRgb: envLighting.petalShadowTintRgb.map((v) =>
+                Number(v.toFixed(3)),
+              ),
+              subsurfaceTintRgb: envLighting.subsurfaceTintRgb.map((v) =>
+                Number(v.toFixed(3)),
+              ),
+              subsurfaceStrengthMultiplier: Number(
+                envLighting.subsurfaceStrengthMultiplier.toFixed(3),
+              ),
+            }
+          : null,
         interactionLogicMode: this.handOverlay?.getInteractionLogicMode(),
         gestureSensitivityPercentage: this.handOverlay?.getSensitivity() ?? 55,
         lowNoiseMode: this.environmentManager.isLowNoiseMode(),
@@ -510,6 +534,13 @@ export class FloraXRScript extends xb.Script {
           this.rollSpring.velocity,
         );
 
+        this.environmentManager.updateEnvironment(
+          b,
+          nowSec,
+          dt,
+          bloomVel,
+          angSpeed,
+        );
         this.applyUnifiedSpecimenTransforms(
           b,
           s,
@@ -520,13 +551,6 @@ export class FloraXRScript extends xb.Script {
           dt,
         );
         this.handOverlay.updateRotationReadout(pitchX, yawY, rollZ);
-        this.environmentManager.updateEnvironment(
-          b,
-          nowSec,
-          dt,
-          bloomVel,
-          angSpeed,
-        );
       }
       this.handOverlay.update(
         performance.now() / 1000 + this.headlessSimulatedSec,
@@ -648,6 +672,9 @@ export class FloraXRScript extends xb.Script {
       model = createFlowerById(id);
       model.setGaussianSplatMode(this.gaussianSplatMode);
       model.setBloomStyle(this.bloomStyle);
+      model.applyEnvironmentLighting(
+        this.environmentManager.getFlowerLightingProfile(),
+      );
       model.visible = false;
       this.flowerModels.set(id, model);
       this.flowerPivotGroup.add(model);
@@ -680,6 +707,9 @@ export class FloraXRScript extends xb.Script {
     this.morphProgress = 0.0;
 
     this.activeFlowerModel = nextModel;
+    this.activeFlowerModel.applyEnvironmentLighting(
+      this.environmentManager.getFlowerLightingProfile(),
+    );
     this.activeFlowerModel.visible = true;
 
     this.transitionScaleSpring.value = 0.86;
@@ -701,6 +731,9 @@ export class FloraXRScript extends xb.Script {
     const env = ENVIRONMENT_LIBRARY[safeIdx];
 
     this.environmentManager.setEnvironment(env);
+    this.activeFlowerModel.applyEnvironmentLighting(
+      this.environmentManager.getFlowerLightingProfile(),
+    );
     this.handOverlay.updateActiveEnvironmentUI(safeIdx);
     this.syncSpatialCardText();
     this.renderSingleHeadlessFrame(650);

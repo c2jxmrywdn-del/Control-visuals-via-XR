@@ -4,8 +4,11 @@ import {
   type EnvironmentSpec,
   type ForceFieldParticleState,
   type BloomForceFieldState,
+  type FlowerEnvironmentLightingProfile,
   computeBloomForceFieldDamping,
   stepForceFieldDampedParticle,
+  computeFlowerEnvironmentLightingProfile,
+  interpolateFlowerLightingProfiles,
   clamp,
 } from './gestureMath';
 
@@ -13,6 +16,10 @@ const PARTICLE_COUNT = 28;
 
 export class EnvironmentManager extends THREE.Group {
   private currentSpec: EnvironmentSpec = ENVIRONMENT_LIBRARY[0];
+  private currentLightingProfile: FlowerEnvironmentLightingProfile =
+    computeFlowerEnvironmentLightingProfile(ENVIRONMENT_LIBRARY[0], 0.78);
+  private targetLightingProfile: FlowerEnvironmentLightingProfile =
+    computeFlowerEnvironmentLightingProfile(ENVIRONMENT_LIBRARY[0], 0.78);
   private hemiLight: THREE.HemisphereLight;
   private keyLight: THREE.DirectionalLight;
   private keyLightTarget: THREE.Object3D;
@@ -23,7 +30,10 @@ export class EnvironmentManager extends THREE.Group {
   private sanctuaryDomeMat!: THREE.ShaderMaterial;
   private pedestalGroup: THREE.Group;
   private livingRoomGroup: THREE.Group;
+  private forestCanopyGroup: THREE.Group;
+  private desertDuneGroup: THREE.Group;
   private coffeeTableGroup: THREE.Group;
+  private basinMat!: THREE.MeshPhysicalMaterial;
   private waterDiscMat!: THREE.MeshPhysicalMaterial;
   private goldTrimMat!: THREE.MeshPhysicalMaterial;
   private rippleRings: THREE.Mesh[] = [];
@@ -60,6 +70,7 @@ export class EnvironmentManager extends THREE.Group {
   private pmremGenerator: THREE.PMREMGenerator | null = null;
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
   private sceneRef: THREE.Scene | null = null;
+  private rendererRef: THREE.WebGLRenderer | null = null;
 
   constructor() {
     super();
@@ -152,8 +163,24 @@ export class EnvironmentManager extends THREE.Group {
       this.currentSpec.id === 'warm-living-room';
     this.add(this.livingRoomGroup);
 
+    this.forestCanopyGroup = new THREE.Group();
+    this.forestCanopyGroup.name = 'EmeraldForestCanopyBackdrop';
+    this.forestCanopyGroup.xb = {pointerEvents: 'none'};
+    this.forestCanopyGroup.visible =
+      this.currentSpec.id === 'emerald-forest';
+    this.add(this.forestCanopyGroup);
+
+    this.desertDuneGroup = new THREE.Group();
+    this.desertDuneGroup.name = 'GoldenDesertMirageBackdrop';
+    this.desertDuneGroup.xb = {pointerEvents: 'none'};
+    this.desertDuneGroup.visible =
+      this.currentSpec.id === 'golden-desert';
+    this.add(this.desertDuneGroup);
+
     this.buildPedestalAndRipples();
     this.buildWarmSunlitLivingRoom();
+    this.buildEmeraldForestBackdrop();
+    this.buildGoldenDesertBackdrop();
 
     this.particlePositions = new Float32Array(PARTICLE_COUNT * 3);
     this.particleVelocities = new Float32Array(PARTICLE_COUNT * 3);
@@ -176,7 +203,7 @@ export class EnvironmentManager extends THREE.Group {
   }
 
   private buildSanctuaryAtmosphere(): void {
-    // Luminous Warm-White & Creamy Golden-Ivory Studio Dome (具有一定饱和度的暖白色)
+    // Dynamic Environment Sky & Studio Dome (adapts smoothly to Studio, Living Room, Emerald Forest, or Golden Desert)
     const domeGeo = new THREE.SphereGeometry(4.6, 48, 32);
     this.sanctuaryDomeMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
@@ -186,6 +213,16 @@ export class EnvironmentManager extends THREE.Group {
         uZenithColor: {value: new THREE.Color(this.currentSpec.bgHex)},
         uHorizonColor: {value: new THREE.Color(this.currentSpec.fogHex)},
         uGlowColor: {value: new THREE.Color(this.currentSpec.rimLightHex)},
+        uHaloColor: {
+          value: new THREE.Vector3(
+            ...this.currentLightingProfile.skyHaloColorRgb,
+          ),
+        },
+        uEdgeTintColor: {
+          value: new THREE.Vector3(
+            ...this.currentLightingProfile.skyEdgeTintRgb,
+          ),
+        },
       },
       vertexShader: `
         varying vec3 vWorldOffset;
@@ -198,24 +235,20 @@ export class EnvironmentManager extends THREE.Group {
         uniform vec3 uZenithColor;
         uniform vec3 uHorizonColor;
         uniform vec3 uGlowColor;
+        uniform vec3 uHaloColor;
+        uniform vec3 uEdgeTintColor;
         varying vec3 vWorldOffset;
         void main() {
           vec3 dir = normalize(vWorldOffset);
           float elev = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-          // Convert linear uniform colors back to sRGB and enrich with warm golden-cream saturation
           vec3 zenithSrgb = pow(clamp(uZenithColor, 0.0, 1.0), vec3(1.0 / 2.2));
           vec3 horizonSrgb = pow(clamp(uHorizonColor, 0.0, 1.0), vec3(1.0 / 2.2));
           vec3 glowSrgb = pow(clamp(uGlowColor, 0.0, 1.0), vec3(1.0 / 2.2));
-          // Moderately saturated warm-white gradient from creamy golden-ivory horizon to sunlit warm-cream zenith
           vec3 baseCol = mix(horizonSrgb, zenithSrgb, smoothstep(0.12, 0.86, elev));
           float centerFocus = max(0.0, dot(dir, normalize(vec3(0.0, 0.08, -1.0))));
           float windowGlow = max(0.0, dot(dir, normalize(vec3(-0.48, 0.36, -0.78))));
-          // Warm cream halo behind the hero flower + warm golden-ivory contour
-          vec3 warmCreamHalo = vec3(1.0, 0.955, 0.86);
-          vec3 skyCol = mix(baseCol, warmCreamHalo, 0.38 * pow(centerFocus, 2.0)) + glowSrgb * pow(windowGlow, 3.5) * 0.045;
-          // Rich warm buttercream peripheral framing so the warm-white saturation is unmistakable
-          vec3 warmEdgeTint = vec3(0.968, 0.872, 0.728);
-          skyCol = mix(warmEdgeTint, skyCol, 0.48 + 0.52 * pow(centerFocus, 1.15));
+          vec3 skyCol = mix(baseCol, uHaloColor, 0.38 * pow(centerFocus, 2.0)) + glowSrgb * pow(windowGlow, 3.5) * 0.065;
+          skyCol = mix(uEdgeTintColor, skyCol, 0.48 + 0.52 * pow(centerFocus, 1.15));
           float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
           skyCol += (ign - 0.5) * (1.8 / 255.0);
           gl_FragColor = vec4(clamp(skyCol, 0.0, 1.0), 1.0);
@@ -332,7 +365,8 @@ export class EnvironmentManager extends THREE.Group {
     if ('environmentIntensity' in this.sceneRef) {
       (
         this.sceneRef as THREE.Scene & {environmentIntensity: number}
-      ).environmentIntensity = 0.28;
+      ).environmentIntensity =
+        this.targetLightingProfile.environmentReflectionIntensity;
     }
 
     keyPanelGeo.dispose();
@@ -352,20 +386,25 @@ export class EnvironmentManager extends THREE.Group {
         typeof navigator !== 'undefined' &&
         (navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent));
       this.sceneRef = scene;
+      this.rendererRef = renderer;
       renderer.setPixelRatio(
         isHeadless ? 1 : Math.min(window.devicePixelRatio || 1, 2),
       );
       renderer.shadowMap.enabled = !isHeadless;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 0.82;
+      renderer.toneMappingExposure =
+        this.currentLightingProfile.toneMappingExposure;
 
       this.pmremGenerator = new THREE.PMREMGenerator(renderer);
       this.pmremGenerator.compileEquirectangularShader();
       this.rebuildUE5LumenEnvironmentMap(this.currentSpec);
 
       scene.background = this.currentBgColor;
-      scene.fog = new THREE.FogExp2(this.currentSpec.fogHex, 0.068);
+      scene.fog = new THREE.FogExp2(
+        this.currentSpec.fogHex,
+        this.currentLightingProfile.fogDensity,
+      );
     } catch (e) {
       console.warn('Studio PMREM setup fallback:', e);
     }
@@ -452,9 +491,9 @@ export class EnvironmentManager extends THREE.Group {
       new THREE.Vector2(0.0, 0.002),
     ];
     const basinGeo = new THREE.LatheGeometry(basinProfile, 64);
-    const basinMat = new THREE.MeshPhysicalMaterial({
-      color: 0xfff5e4,
-      emissive: new THREE.Color(0xfce6c4),
+    this.basinMat = new THREE.MeshPhysicalMaterial({
+      color: this.currentLightingProfile.basinBaseHex,
+      emissive: new THREE.Color(this.currentLightingProfile.basinEmissiveHex),
       emissiveIntensity: 0.34,
       roughness: 0.18,
       metalness: 0.04,
@@ -463,7 +502,7 @@ export class EnvironmentManager extends THREE.Group {
       sheen: 0.35,
       sheenColor: new THREE.Color('#fff9ee'),
     });
-    const basinMesh = new THREE.Mesh(basinGeo, basinMat);
+    const basinMesh = new THREE.Mesh(basinGeo, this.basinMat);
     basinMesh.receiveShadow = true;
     this.pedestalGroup.add(basinMesh);
 
@@ -827,6 +866,165 @@ export class EnvironmentManager extends THREE.Group {
     this.livingRoomGroup.add(floorVase);
   }
 
+  /**
+   * Builds the "Emerald Canopy Forest" (翡翠幽林) 3D botanical backdrop:
+   * - Moss-draped forest floor & misty emerald glade in the far background (z = -2.2 .. -2.9)
+   * - Dappled emerald-jade canopy sunbeams streaming from upper right to bathe the 3D flower
+   * - Sculpted mossy forest boulders and slender bamboo/fern silhouettes framing the periphery
+   */
+  private buildEmeraldForestBackdrop(): void {
+    const mossFloorGeo = new THREE.PlaneGeometry(14.0, 5.2);
+    mossFloorGeo.rotateX(-Math.PI / 2);
+    const mossFloorMat = new THREE.MeshStandardMaterial({
+      color: 0x4b7f62,
+      emissive: new THREE.Color(0x2f5e46),
+      emissiveIntensity: 0.48,
+      roughness: 0.88,
+      metalness: 0.0,
+    });
+    const mossFloor = new THREE.Mesh(mossFloorGeo, mossFloorMat);
+    mossFloor.position.set(0, 0.18, -2.1);
+    this.forestCanopyGroup.add(mossFloor);
+
+    // Distant misty forest glade backdrop wall
+    const gladeWallGeo = new THREE.PlaneGeometry(14.0, 6.2);
+    const gladeWallMat = new THREE.MeshStandardMaterial({
+      color: 0xbce3ce,
+      emissive: new THREE.Color(0x95cfb2),
+      emissiveIntensity: 0.68,
+      roughness: 0.94,
+    });
+    const gladeWall = new THREE.Mesh(gladeWallGeo, gladeWallMat);
+    gladeWall.position.set(0, 1.65, -2.96);
+    this.forestCanopyGroup.add(gladeWall);
+
+    // Peripheral ancient forest trunks & mossy stones (left & right framing, clear center for hero flower)
+    const trunkMat = new THREE.MeshStandardMaterial({
+      color: 0x52796f,
+      emissive: new THREE.Color(0x354f52),
+      emissiveIntensity: 0.38,
+      roughness: 0.85,
+    });
+    const canopyFoliageMat = new THREE.MeshStandardMaterial({
+      color: 0x52b788,
+      emissive: new THREE.Color(0x40916c),
+      emissiveIntensity: 0.45,
+      roughness: 0.78,
+    });
+    const trunkConfigs = [
+      {x: -1.45, z: -2.65, r: 0.12, h: 3.4, rotZ: -0.05},
+      {x: -1.05, z: -2.82, r: 0.085, h: 3.2, rotZ: 0.04},
+      {x: 1.38, z: -2.62, r: 0.11, h: 3.4, rotZ: 0.06},
+      {x: 0.98, z: -2.84, r: 0.08, h: 3.1, rotZ: -0.03},
+    ];
+    for (const cfg of trunkConfigs) {
+      const tGeo = new THREE.CylinderGeometry(cfg.r * 0.82, cfg.r, cfg.h, 16);
+      const tMesh = new THREE.Mesh(tGeo, trunkMat);
+      tMesh.position.set(cfg.x, 1.55, cfg.z);
+      tMesh.rotation.z = cfg.rotZ;
+      this.forestCanopyGroup.add(tMesh);
+
+      const crownGeo = new THREE.SphereGeometry(cfg.r * 4.5, 16, 12);
+      crownGeo.scale(1.3, 0.55, 0.9);
+      const crownMesh = new THREE.Mesh(crownGeo, canopyFoliageMat);
+      crownMesh.position.set(cfg.x * 0.88, 2.55, cfg.z + 0.12);
+      this.forestCanopyGroup.add(crownMesh);
+    }
+
+    // Dappled Emerald Forest Sunbeams
+    const sunbeamTex = this.createFeatheredSunbeamTexture();
+    const beamGeo = new THREE.PlaneGeometry(1.45, 2.9);
+    const beamMat = new THREE.MeshBasicMaterial({
+      map: sunbeamTex,
+      color: 0xd8f3dc,
+      transparent: true,
+      opacity: 0.3,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const beam1 = new THREE.Mesh(beamGeo, beamMat);
+    beam1.position.set(0.42, 1.55, -2.25);
+    beam1.rotation.z = 0.28;
+    this.forestCanopyGroup.add(beam1);
+
+    const beam2 = new THREE.Mesh(beamGeo, beamMat);
+    beam2.position.set(-0.55, 1.52, -2.38);
+    beam2.rotation.z = 0.32;
+    beam2.scale.setScalar(0.82);
+    this.forestCanopyGroup.add(beam2);
+  }
+
+  /**
+   * Builds the "Golden Mirage Desert" (大漠金沙) 3D backdrop:
+   * - Sweeping warm terracotta & ochre sand dunes in the far background (z = -2.2 .. -2.9)
+   * - Radiant low-angle golden desert sun disc & warm amber mirage glow framing the hero flower
+   */
+  private buildGoldenDesertBackdrop(): void {
+    const sandFloorGeo = new THREE.PlaneGeometry(14.0, 5.2);
+    sandFloorGeo.rotateX(-Math.PI / 2);
+    const sandFloorMat = new THREE.MeshStandardMaterial({
+      color: 0xe09f5a,
+      emissive: new THREE.Color(0xc87d36),
+      emissiveIntensity: 0.52,
+      roughness: 0.86,
+      metalness: 0.02,
+    });
+    const sandFloor = new THREE.Mesh(sandFloorGeo, sandFloorMat);
+    sandFloor.position.set(0, 0.18, -2.1);
+    this.desertDuneGroup.add(sandFloor);
+
+    const desertSkyWallGeo = new THREE.PlaneGeometry(14.0, 6.2);
+    const desertSkyWallMat = new THREE.MeshStandardMaterial({
+      color: 0xf7cfa0,
+      emissive: new THREE.Color(0xefb778),
+      emissiveIntensity: 0.72,
+      roughness: 0.92,
+    });
+    const desertSkyWall = new THREE.Mesh(desertSkyWallGeo, desertSkyWallMat);
+    desertSkyWall.position.set(0, 1.65, -2.96);
+    this.desertDuneGroup.add(desertSkyWall);
+
+    // Sculpted rolling desert sand dunes in the secondary background
+    const duneMat1 = new THREE.MeshStandardMaterial({
+      color: 0xd9823b,
+      emissive: new THREE.Color(0xb86322),
+      emissiveIntensity: 0.44,
+      roughness: 0.84,
+    });
+    const duneMat2 = new THREE.MeshStandardMaterial({
+      color: 0xe69b56,
+      emissive: new THREE.Color(0xc97a35),
+      emissiveIntensity: 0.48,
+      roughness: 0.84,
+    });
+
+    const leftDuneGeo = new THREE.SphereGeometry(1.35, 32, 20);
+    leftDuneGeo.scale(1.65, 0.34, 0.55);
+    const leftDune = new THREE.Mesh(leftDuneGeo, duneMat1);
+    leftDune.position.set(-1.25, 0.32, -2.62);
+    this.desertDuneGroup.add(leftDune);
+
+    const rightDuneGeo = new THREE.SphereGeometry(1.45, 32, 20);
+    rightDuneGeo.scale(1.75, 0.38, 0.58);
+    const rightDune = new THREE.Mesh(rightDuneGeo, duneMat2);
+    rightDune.position.set(1.18, 0.36, -2.72);
+    this.desertDuneGroup.add(rightDune);
+
+    // Radiant Golden-Hour Desert Sun Halo in upper right sky
+    const sunDiscGeo = new THREE.CircleGeometry(0.48, 48);
+    const sunDiscMat = new THREE.MeshBasicMaterial({
+      color: 0xfff3c4,
+      transparent: true,
+      opacity: 0.62,
+      toneMapped: false,
+    });
+    const sunDisc = new THREE.Mesh(sunDiscGeo, sunDiscMat);
+    sunDisc.position.set(1.05, 1.92, -2.85);
+    this.desertDuneGroup.add(sunDisc);
+  }
+
   private buildParticleSystem(): void {
     const geo = new THREE.SphereGeometry(0.003, 10, 10);
     this.particleMaterial = new THREE.MeshBasicMaterial({
@@ -883,12 +1081,30 @@ export class EnvironmentManager extends THREE.Group {
     this.targetGroundColor.setHex(spec.groundHex);
     this.targetParticleColor.setHex(spec.particleHex);
 
+    this.targetLightingProfile = computeFlowerEnvironmentLightingProfile(
+      spec,
+      0.78,
+    );
+    // Immediately advance 45% toward the new environment lighting profile for instant visual responsiveness,
+    // then let updateEnvironment smoothly finish the transition
+    this.currentLightingProfile = interpolateFlowerLightingProfiles(
+      this.currentLightingProfile,
+      this.targetLightingProfile,
+      0.45,
+    );
+
     const isLivingRoom = spec.id === 'warm-living-room';
     this.livingRoomGroup.visible = isLivingRoom;
     this.coffeeTableGroup.visible = isLivingRoom;
+    this.forestCanopyGroup.visible = spec.id === 'emerald-forest';
+    this.desertDuneGroup.visible = spec.id === 'golden-desert';
 
     this.rebuildUE5LumenEnvironmentMap(spec);
     this.triggerGestureBurst();
+  }
+
+  getFlowerLightingProfile(): FlowerEnvironmentLightingProfile {
+    return this.currentLightingProfile;
   }
 
   triggerGestureBurst(accentColorHex?: string): void {
@@ -910,7 +1126,18 @@ export class EnvironmentManager extends THREE.Group {
     angularSpeedRadPerSec = 0,
   ): void {
     const safeDt = clamp(dt, 0.001, 0.05);
-    const lerpFactor = clamp(safeDt * 4.5, 0.02, 0.25);
+    const lerpFactor = clamp(safeDt * 5.2, 0.04, 0.32);
+
+    this.targetLightingProfile = computeFlowerEnvironmentLightingProfile(
+      this.currentSpec,
+      bloom01,
+    );
+    this.currentLightingProfile = interpolateFlowerLightingProfiles(
+      this.currentLightingProfile,
+      this.targetLightingProfile,
+      lerpFactor,
+    );
+    const lp = this.currentLightingProfile;
 
     this.currentBgColor.lerp(this.targetBgColor, lerpFactor);
     this.currentFogColor.lerp(this.targetFogColor, lerpFactor);
@@ -923,26 +1150,59 @@ export class EnvironmentManager extends THREE.Group {
       this.targetRimColor,
       lerpFactor,
     );
+    this.sanctuaryDomeMat.uniforms.uHaloColor.value.set(
+      lp.skyHaloColorRgb[0],
+      lp.skyHaloColorRgb[1],
+      lp.skyHaloColorRgb[2],
+    );
+    this.sanctuaryDomeMat.uniforms.uEdgeTintColor.value.set(
+      lp.skyEdgeTintRgb[0],
+      lp.skyEdgeTintRgb[1],
+      lp.skyEdgeTintRgb[2],
+    );
 
     if (this.sceneRef?.fog instanceof THREE.FogExp2) {
       this.sceneRef.fog.color.copy(this.currentFogColor);
+      this.sceneRef.fog.density = lp.fogDensity;
+    }
+    if (this.rendererRef) {
+      this.rendererRef.toneMappingExposure = lp.toneMappingExposure;
     }
 
     this.hemiLight.color.lerp(this.targetAmbientColor, lerpFactor);
     this.hemiLight.groundColor.lerp(this.targetGroundColor, lerpFactor);
+    this.hemiLight.intensity = lp.hemiIntensity;
+
     this.keyLight.color.lerp(this.targetKeyColor, lerpFactor);
+    this.keyLight.position.set(
+      lp.keyLightPosition[0],
+      lp.keyLightPosition[1],
+      lp.keyLightPosition[2],
+    );
+
     this.rimLight.color.lerp(this.targetRimColor, lerpFactor);
+    this.rimLight.position.set(
+      lp.rimLightPosition[0],
+      lp.rimLightPosition[1],
+      lp.rimLightPosition[2],
+    );
+
     this.fillLight.color.lerp(this.targetFillColor, lerpFactor);
+    this.fillLight.intensity = lp.fillLightIntensity;
+
     this.bounceLight.color.lerp(this.targetGroundColor, lerpFactor);
+    this.basinMat.color.setHex(lp.basinBaseHex);
+    this.basinMat.emissive.setHex(lp.basinEmissiveHex);
     this.waterDiscMat.color.lerp(this.targetGroundColor, lerpFactor);
+    this.waterDiscMat.emissive.setHex(lp.basinEmissiveHex);
     this.particleMaterial.color.lerp(this.targetParticleColor, lerpFactor);
     this.godRayMat.color.lerp(this.targetKeyColor, lerpFactor);
 
     this.burstIntensity = Math.max(0, this.burstIntensity - safeDt * 1.65);
 
-    this.keyLight.intensity = 0.82 + bloom01 * 0.16 + this.burstIntensity * 0.1;
-    this.rimLight.intensity = 0.58 + bloom01 * 0.18 + this.burstIntensity * 0.1;
-    this.bounceLight.intensity = 0.22 + bloom01 * 0.12;
+    this.keyLight.intensity = lp.keyLightIntensity + this.burstIntensity * 0.1;
+    this.rimLight.intensity = lp.rimLightIntensity + this.burstIntensity * 0.1;
+    this.bounceLight.intensity = lp.bounceLightIntensity;
 
     for (let i = 0; i < this.godRayMeshes.length; i++) {
       const ray = this.godRayMeshes[i];

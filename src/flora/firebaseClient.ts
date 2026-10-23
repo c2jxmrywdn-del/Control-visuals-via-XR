@@ -136,17 +136,13 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Validate Connection to Firestore on boot
+// Validate Connection to Firestore on boot (silently in unauthenticated preview mode)
 async function testConnection(): Promise<void> {
+  if (!auth.currentUser) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.includes('the client is offline')
-    ) {
-      console.error('Please check your Firebase configuration.');
-    }
+  } catch {
+    // Operate gracefully in offline/unauthenticated mode until user signs in
   }
 }
 void testConnection();

@@ -417,6 +417,36 @@ export const ENVIRONMENT_LIBRARY: EnvironmentSpec[] = [
     particleHex: 0xd98a2b,
     accentCss: '#d97706',
   },
+  {
+    id: 'emerald-forest',
+    nameZh: '翡翠幽林',
+    nameEn: 'Emerald Canopy Forest',
+    subtitleZh: '林冠斑驳翠影与冷润青苔漫反射，激发花瓣清透翡翠次表面散射与露珠冷辉',
+    bgHex: 0xdcf2e6,
+    fogHex: 0xbce3ce,
+    ambientHex: 0xa7e8c8,
+    groundHex: 0x4c956c,
+    keyLightHex: 0xe6ffdb,
+    rimLightHex: 0x6ee7b7,
+    fillLightHex: 0x99f6e4,
+    particleHex: 0x34d399,
+    accentCss: '#10b981',
+  },
+  {
+    id: 'golden-desert',
+    nameZh: '大漠金沙',
+    nameEn: 'Golden Mirage Desert',
+    subtitleZh: '烈日金晖与赤陶暖沙漫反射，赋予花冠浓郁琥珀金高反差暖调与丝绒金边',
+    bgHex: 0xfde2bc,
+    fogHex: 0xf5c489,
+    ambientHex: 0xffd29d,
+    groundHex: 0xd9823b,
+    keyLightHex: 0xffdf9e,
+    rimLightHex: 0xff8c3b,
+    fillLightHex: 0xfdba74,
+    particleHex: 0xf59e0b,
+    accentCss: '#ea580c',
+  },
 ];
 
 export function clamp(val: number, min: number, max: number): number {
@@ -2698,6 +2728,351 @@ export function evaluateDetailedBloomKinematics(
     dewdropSlideProgress,
   };
 }
+
+export interface FlowerEnvironmentLightingProfile {
+  envId: string;
+  themeMoodZh: string;
+  colorTemperatureKelvin: number;
+  // Scene & directional rig parameters
+  keyLightPosition: [number, number, number];
+  rimLightPosition: [number, number, number];
+  keyLightIntensity: number;
+  rimLightIntensity: number;
+  hemiIntensity: number;
+  fillLightIntensity: number;
+  bounceLightIntensity: number;
+  toneMappingExposure: number;
+  environmentReflectionIntensity: number;
+  fogDensity: number;
+  skyHaloColorRgb: [number, number, number];
+  skyEdgeTintRgb: [number, number, number];
+  basinBaseHex: number;
+  basinEmissiveHex: number;
+  // 3D Flower surface & subsurface shader color-grading parameters
+  petalDirectTintRgb: [number, number, number];
+  petalShadowTintRgb: [number, number, number];
+  subsurfaceTintRgb: [number, number, number];
+  subsurfaceStrengthMultiplier: number;
+  velvetSheenTintRgb: [number, number, number];
+  sheenIntensityMultiplier: number;
+  foliageColorShiftRgb: [number, number, number];
+  splatKeyDir: [number, number, number];
+  splatEnvRadianceTintRgb: [number, number, number];
+  coreGlowColorHex: number;
+  coreGlowIntensityMultiplier: number;
+  dewdropSpecularTintHex: number;
+}
+
+function hexToRgb01(hex: number): [number, number, number] {
+  const r = ((hex >> 16) & 0xff) / 255;
+  const g = ((hex >> 8) & 0xff) / 255;
+  const b = (hex & 0xff) / 255;
+  return [r, g, b];
+}
+
+function rgb01ToHex(rgb: [number, number, number]): number {
+  const r = Math.round(clamp(rgb[0], 0, 1) * 255);
+  const g = Math.round(clamp(rgb[1], 0, 1) * 255);
+  const b = Math.round(clamp(rgb[2], 0, 1) * 255);
+  return (r << 16) | (g << 8) | b;
+}
+
+function normalizeVec3(v: [number, number, number]): [number, number, number] {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+/**
+ * Computes the complete 3D scene lighting rig & 3D flower shader color-grading profile
+ * for the selected `EnvironmentSpec` and current `bloom01` state so that the 3D flower's
+ * direct illumination, ambient crevices, subsurface translucency, velvet rim sheen,
+ * foliage chlorophyll tone, and 3DGS radiance field harmonize with the active environment
+ * (e.g., Studio, Living Room, Emerald Forest, or Golden Desert).
+ */
+export function computeFlowerEnvironmentLightingProfile(
+  spec: EnvironmentSpec,
+  bloom01 = 0.78,
+): FlowerEnvironmentLightingProfile {
+  const b = clamp(bloom01, 0, 1);
+
+  if (spec.id === 'emerald-forest') {
+    const keyPos: [number, number, number] = [0.95, 3.15, 0.25];
+    return {
+      envId: spec.id,
+      themeMoodZh: '林冠翠影 · 冷润青苔漫反射与翡翠次表面透光',
+      colorTemperatureKelvin: 6400,
+      keyLightPosition: keyPos,
+      rimLightPosition: [-1.42, 2.45, -2.25],
+      keyLightIntensity: 0.78 + b * 0.16,
+      rimLightIntensity: 0.72 + b * 0.22,
+      hemiIntensity: 0.44,
+      fillLightIntensity: 0.34,
+      bounceLightIntensity: 0.28 + b * 0.12,
+      toneMappingExposure: 0.84,
+      environmentReflectionIntensity: 0.34,
+      fogDensity: 0.082,
+      skyHaloColorRgb: [0.85, 0.98, 0.90],
+      skyEdgeTintRgb: [0.64, 0.85, 0.75],
+      basinBaseHex: 0xe3f4eb,
+      basinEmissiveHex: 0xb6e2ca,
+      // Dappled emerald-sunbeam direct highlight & cool mossy-jade shadow crevices on the flower
+      petalDirectTintRgb: [0.86, 1.08, 0.94],
+      petalShadowTintRgb: [0.54, 0.95, 0.82],
+      subsurfaceTintRgb: [0.52, 1.04, 0.84],
+      subsurfaceStrengthMultiplier: 1.36,
+      velvetSheenTintRgb: [0.58, 1.04, 0.88],
+      sheenIntensityMultiplier: 1.32,
+      foliageColorShiftRgb: [0.78, 1.16, 0.94],
+      splatKeyDir: normalizeVec3(keyPos),
+      splatEnvRadianceTintRgb: [0.82, 1.08, 0.94],
+      coreGlowColorHex: 0x6ee7b7,
+      coreGlowIntensityMultiplier: 1.24,
+      dewdropSpecularTintHex: 0xd1fae5,
+    };
+  }
+
+  if (spec.id === 'golden-desert') {
+    const keyPos: [number, number, number] = [2.15, 2.05, 0.68];
+    return {
+      envId: spec.id,
+      themeMoodZh: '大漠金晖 · 炽热琥珀斜阳与赤陶暖沙漫反射',
+      colorTemperatureKelvin: 3600,
+      keyLightPosition: keyPos,
+      rimLightPosition: [-1.75, 1.82, -2.42],
+      keyLightIntensity: 1.04 + b * 0.20,
+      rimLightIntensity: 0.76 + b * 0.22,
+      hemiIntensity: 0.38,
+      fillLightIntensity: 0.32,
+      bounceLightIntensity: 0.34 + b * 0.14,
+      toneMappingExposure: 0.88,
+      environmentReflectionIntensity: 0.32,
+      fogDensity: 0.076,
+      skyHaloColorRgb: [1.0, 0.90, 0.72],
+      skyEdgeTintRgb: [0.94, 0.72, 0.48],
+      basinBaseHex: 0xfcead2,
+      basinEmissiveHex: 0xf3c68f,
+      // High-contrast golden-amber solar key & warm terracotta-ochre sand bounce on the flower
+      petalDirectTintRgb: [1.16, 0.92, 0.70],
+      petalShadowTintRgb: [1.08, 0.74, 0.52],
+      subsurfaceTintRgb: [1.08, 0.75, 0.38],
+      subsurfaceStrengthMultiplier: 1.32,
+      velvetSheenTintRgb: [1.08, 0.82, 0.48],
+      sheenIntensityMultiplier: 1.26,
+      foliageColorShiftRgb: [1.16, 0.96, 0.74],
+      splatKeyDir: normalizeVec3(keyPos),
+      splatEnvRadianceTintRgb: [1.14, 0.89, 0.68],
+      coreGlowColorHex: 0xff9e00,
+      coreGlowIntensityMultiplier: 1.34,
+      dewdropSpecularTintHex: 0xffedd5,
+    };
+  }
+
+  if (spec.id === 'warm-living-room') {
+    const keyPos: [number, number, number] = [-1.52, 2.48, 0.52];
+    return {
+      envId: spec.id,
+      themeMoodZh: '纱窗暖阳 · 午后侧逆柔光与亚麻暖白漫反射',
+      colorTemperatureKelvin: 4500,
+      keyLightPosition: keyPos,
+      rimLightPosition: [1.48, 2.12, -2.28],
+      keyLightIntensity: 0.88 + b * 0.16,
+      rimLightIntensity: 0.62 + b * 0.18,
+      hemiIntensity: 0.36,
+      fillLightIntensity: 0.30,
+      bounceLightIntensity: 0.25 + b * 0.12,
+      toneMappingExposure: 0.84,
+      environmentReflectionIntensity: 0.29,
+      fogDensity: 0.066,
+      skyHaloColorRgb: [1.0, 0.945, 0.84],
+      skyEdgeTintRgb: [0.96, 0.85, 0.70],
+      basinBaseHex: 0xfff3df,
+      basinEmissiveHex: 0xf9dfc0,
+      petalDirectTintRgb: [1.03, 0.97, 0.90],
+      petalShadowTintRgb: [0.98, 0.90, 0.82],
+      subsurfaceTintRgb: [1.0, 0.90, 0.76],
+      subsurfaceStrengthMultiplier: 1.08,
+      velvetSheenTintRgb: [1.0, 0.93, 0.82],
+      sheenIntensityMultiplier: 1.05,
+      foliageColorShiftRgb: [1.03, 1.01, 0.92],
+      splatKeyDir: normalizeVec3(keyPos),
+      splatEnvRadianceTintRgb: [1.02, 0.96, 0.89],
+      coreGlowColorHex: 0xffbe0b,
+      coreGlowIntensityMultiplier: 1.06,
+      dewdropSpecularTintHex: 0xfffbeb,
+    };
+  }
+
+  // Default: 'translucent-white' (Warm Translucent White Studio) or custom EnvironmentSpec
+  const keyRgb = hexToRgb01(spec.keyLightHex);
+  const ambRgb = hexToRgb01(spec.ambientHex);
+  const rimRgb = hexToRgb01(spec.rimLightHex);
+  const keyPos: [number, number, number] = [1.45, 2.75, 0.45];
+  return {
+    envId: spec.id,
+    themeMoodZh: '羊脂玉展厅 · 博物馆级均衡柔光与原色花맥还原',
+    colorTemperatureKelvin: 5200,
+    keyLightPosition: keyPos,
+    rimLightPosition: [-1.55, 2.15, -2.35],
+    keyLightIntensity: 0.84 + b * 0.16,
+    rimLightIntensity: 0.58 + b * 0.18,
+    hemiIntensity: 0.34,
+    fillLightIntensity: 0.28,
+    bounceLightIntensity: 0.22 + b * 0.12,
+    toneMappingExposure: 0.82,
+    environmentReflectionIntensity: 0.28,
+    fogDensity: 0.068,
+    skyHaloColorRgb: [1.0, 0.955, 0.86],
+    skyEdgeTintRgb: [0.968, 0.872, 0.728],
+    basinBaseHex: 0xfff5e4,
+    basinEmissiveHex: 0xfce6c4,
+    petalDirectTintRgb: [
+      clamp(0.85 + keyRgb[0] * 0.15, 0.8, 1.15),
+      clamp(0.85 + keyRgb[1] * 0.15, 0.8, 1.15),
+      clamp(0.85 + keyRgb[2] * 0.15, 0.8, 1.15),
+    ],
+    petalShadowTintRgb: [
+      clamp(0.75 + ambRgb[0] * 0.22, 0.6, 1.1),
+      clamp(0.75 + ambRgb[1] * 0.22, 0.6, 1.1),
+      clamp(0.75 + ambRgb[2] * 0.22, 0.6, 1.1),
+    ],
+    subsurfaceTintRgb: [
+      clamp(0.7 + rimRgb[0] * 0.3, 0.5, 1.1),
+      clamp(0.7 + rimRgb[1] * 0.3, 0.5, 1.1),
+      clamp(0.7 + rimRgb[2] * 0.3, 0.5, 1.1),
+    ],
+    subsurfaceStrengthMultiplier: 1.0,
+    velvetSheenTintRgb: [1.0, 0.97, 0.92],
+    sheenIntensityMultiplier: 1.0,
+    foliageColorShiftRgb: [1.0, 1.0, 1.0],
+    splatKeyDir: normalizeVec3(keyPos),
+    splatEnvRadianceTintRgb: [1.0, 0.98, 0.95],
+    coreGlowColorHex: 0xffca3a,
+    coreGlowIntensityMultiplier: 1.0,
+    dewdropSpecularTintHex: 0xffffff,
+  };
+}
+
+function lerpNum(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpVec3(
+  a: [number, number, number],
+  b: [number, number, number],
+  t: number,
+): [number, number, number] {
+  return [
+    lerpNum(a[0], b[0], t),
+    lerpNum(a[1], b[1], t),
+    lerpNum(a[2], b[2], t),
+  ];
+}
+
+function lerpHex(hexA: number, hexB: number, t: number): number {
+  return rgb01ToHex(lerpVec3(hexToRgb01(hexA), hexToRgb01(hexB), t));
+}
+
+/**
+ * Smoothly interpolates between two `FlowerEnvironmentLightingProfile` states by `alpha` in [0, 1]
+ * so switching environments produces a seamless cinematic lighting & petal color transition.
+ */
+export function interpolateFlowerLightingProfiles(
+  from: FlowerEnvironmentLightingProfile,
+  to: FlowerEnvironmentLightingProfile,
+  alpha: number,
+): FlowerEnvironmentLightingProfile {
+  const t = clamp(alpha, 0, 1);
+  return {
+    envId: t > 0 ? to.envId : from.envId,
+    themeMoodZh: t > 0 ? to.themeMoodZh : from.themeMoodZh,
+    colorTemperatureKelvin: Math.round(
+      lerpNum(from.colorTemperatureKelvin, to.colorTemperatureKelvin, t),
+    ),
+    keyLightPosition: lerpVec3(from.keyLightPosition, to.keyLightPosition, t),
+    rimLightPosition: lerpVec3(from.rimLightPosition, to.rimLightPosition, t),
+    keyLightIntensity: lerpNum(from.keyLightIntensity, to.keyLightIntensity, t),
+    rimLightIntensity: lerpNum(from.rimLightIntensity, to.rimLightIntensity, t),
+    hemiIntensity: lerpNum(from.hemiIntensity, to.hemiIntensity, t),
+    fillLightIntensity: lerpNum(
+      from.fillLightIntensity,
+      to.fillLightIntensity,
+      t,
+    ),
+    bounceLightIntensity: lerpNum(
+      from.bounceLightIntensity,
+      to.bounceLightIntensity,
+      t,
+    ),
+    toneMappingExposure: lerpNum(
+      from.toneMappingExposure,
+      to.toneMappingExposure,
+      t,
+    ),
+    environmentReflectionIntensity: lerpNum(
+      from.environmentReflectionIntensity,
+      to.environmentReflectionIntensity,
+      t,
+    ),
+    fogDensity: lerpNum(from.fogDensity, to.fogDensity, t),
+    skyHaloColorRgb: lerpVec3(from.skyHaloColorRgb, to.skyHaloColorRgb, t),
+    skyEdgeTintRgb: lerpVec3(from.skyEdgeTintRgb, to.skyEdgeTintRgb, t),
+    basinBaseHex: lerpHex(from.basinBaseHex, to.basinBaseHex, t),
+    basinEmissiveHex: lerpHex(from.basinEmissiveHex, to.basinEmissiveHex, t),
+    petalDirectTintRgb: lerpVec3(
+      from.petalDirectTintRgb,
+      to.petalDirectTintRgb,
+      t,
+    ),
+    petalShadowTintRgb: lerpVec3(
+      from.petalShadowTintRgb,
+      to.petalShadowTintRgb,
+      t,
+    ),
+    subsurfaceTintRgb: lerpVec3(
+      from.subsurfaceTintRgb,
+      to.subsurfaceTintRgb,
+      t,
+    ),
+    subsurfaceStrengthMultiplier: lerpNum(
+      from.subsurfaceStrengthMultiplier,
+      to.subsurfaceStrengthMultiplier,
+      t,
+    ),
+    velvetSheenTintRgb: lerpVec3(
+      from.velvetSheenTintRgb,
+      to.velvetSheenTintRgb,
+      t,
+    ),
+    sheenIntensityMultiplier: lerpNum(
+      from.sheenIntensityMultiplier,
+      to.sheenIntensityMultiplier,
+      t,
+    ),
+    foliageColorShiftRgb: lerpVec3(
+      from.foliageColorShiftRgb,
+      to.foliageColorShiftRgb,
+      t,
+    ),
+    splatKeyDir: normalizeVec3(lerpVec3(from.splatKeyDir, to.splatKeyDir, t)),
+    splatEnvRadianceTintRgb: lerpVec3(
+      from.splatEnvRadianceTintRgb,
+      to.splatEnvRadianceTintRgb,
+      t,
+    ),
+    coreGlowColorHex: lerpHex(from.coreGlowColorHex, to.coreGlowColorHex, t),
+    coreGlowIntensityMultiplier: lerpNum(
+      from.coreGlowIntensityMultiplier,
+      to.coreGlowIntensityMultiplier,
+      t,
+    ),
+    dewdropSpecularTintHex: lerpHex(
+      from.dewdropSpecularTintHex,
+      to.dewdropSpecularTintHex,
+      t,
+    ),
+  };
+}
+
 
 
 
