@@ -678,6 +678,68 @@ test('evaluateOrganBudToBloomPose enforces non-intersecting closed-bud geometry 
   );
 });
 
+test('Sunflower capitulum specification uses 2 non-overlapping staggered rings of 12+12=24 ray florets and dual blooming modes work', () => {
+  const sunflower = FLOWER_LIBRARY.find((f) => f.id === 'sunflower');
+  assert.ok(sunflower, 'Sunflower must exist in FLOWER_LIBRARY');
+  const totalRayFlorets =
+    sunflower.outerPetals +
+    sunflower.midOuterPetals +
+    sunflower.midPetals +
+    sunflower.innerPetals +
+    sunflower.centerPetals;
+  assert.equal(
+    totalRayFlorets,
+    24,
+    'Sunflower must have 12 inner + 12 outer = 24 ray florets so petals never crowd or overlap',
+  );
+  assert.ok(
+    sunflower.petalWidth <= 0.055,
+    'Sunflower ray floret width must be slender enough to avoid circumferential overlap',
+  );
 
+  // Compare 'classic-cupped' vs 'heliotropic-reflex' blooming kinematics
+  const innerPitchCupped = evaluateOrganPitchAtBloom(
+    0.16,
+    0.72,
+    0.05,
+    0.35,
+    'classic-cupped',
+  );
+  const innerPitchHelio = evaluateOrganPitchAtBloom(
+    0.16,
+    0.72,
+    0.05,
+    0.35,
+    'heliotropic-reflex',
+  );
+  assert.ok(
+    innerPitchHelio > innerPitchCupped + 0.06,
+    `Heliotropic-reflex mode must open inner heart petals earlier at b=0.35 (${innerPitchHelio} > ${innerPitchCupped})`,
+  );
 
+  const outerPitchCuppedFull = evaluateOrganPitchAtBloom(
+    0.42,
+    1.38,
+    0.92,
+    1.0,
+    'classic-cupped',
+  );
+  const outerPitchHelioFull = evaluateOrganPitchAtBloom(
+    0.42,
+    1.38,
+    0.92,
+    1.0,
+    'heliotropic-reflex',
+  );
+  assert.ok(
+    outerPitchHelioFull > outerPitchCuppedFull + 0.12,
+    `Heliotropic-reflex mode must arch outer petals wider at b=1.0 (${outerPitchHelioFull} > ${outerPitchCuppedFull})`,
+  );
 
+  const stamenCupped = evaluateStamenPitchAtBloom(0.1, 0.5, 1.0, 'classic-cupped');
+  const stamenHelio = evaluateStamenPitchAtBloom(0.1, 0.5, 1.0, 'heliotropic-reflex');
+  assert.ok(
+    stamenHelio > stamenCupped,
+    'Heliotropic-reflex mode must fan stamens wider into a radiant solar corona',
+  );
+});

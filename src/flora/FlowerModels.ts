@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import {
   FLOWER_LIBRARY,
   type FlowerSpec,
+  type FloralShellEnvelope,
   type GaussianSplatMode,
+  type BloomKinematicsStyle,
   type BloomForceFieldState,
   type ForceFieldParticleState,
   clamp,
@@ -990,6 +992,7 @@ function createSculptedPetalGeometry(
   tipRoundness = 0.72,
   serrationAmp = 0.0,
   asymmetrySeed = 0.0,
+  basalClawWidth = 0.12,
 ): THREE.BufferGeometry {
   const segU = IS_HEADLESS ? 20 : 44;
   const segV = IS_HEADLESS ? 24 : 52;
@@ -1000,6 +1003,7 @@ function createSculptedPetalGeometry(
   const safeCup = clamp(cupDepth, 0.06, 0.34);
   const safeRuffle = clamp(ruffleAmp, 0, 0.014);
   const safeRecurve = clamp(recurvedFactor, -0.45, 0.36);
+  const safeClaw = clamp(basalClawWidth, 0.08, 0.85);
   const asymPhase = asymmetrySeed * 1.37;
   const lateralSweep = Math.sin(asymmetrySeed * 2.1) * width * 0.036;
 
@@ -1010,13 +1014,15 @@ function createSculptedPetalGeometry(
     const u = rawX * 2; // -1 .. +1
     const v = rawY + 0.5; // 0 .. 1 (0 at base claw, 1 at petal tip)
 
-    // Plump, full obovate/spoon petal silhouette with slender basal claw (prevents basal overlap in bud state!)
-    const peakV = clamp(widthTipBias, 0.46, 0.76);
+    // Plump, full obovate/spoon petal silhouette with configurable basal claw width
+    // (0.12 slender claw for petals prevents bud overlap; 0.72 broad claw for calyx sepals seamlessly clasps receptacle!)
+    const peakV = clamp(widthTipBias, 0.42, 0.76);
     let widthProfile: number;
     if (v <= peakV) {
       const t = v / peakV;
       widthProfile =
-        0.10 + 0.90 * Math.sin(Math.pow(t, 0.82) * (Math.PI * 0.5));
+        safeClaw +
+        (1.0 - safeClaw) * Math.sin(Math.pow(t, 0.82) * (Math.PI * 0.5));
     } else {
       const t = clamp((v - peakV) / Math.max(0.05, 1 - peakV), 0, 1);
       const acuteArch = Math.cos(t * (Math.PI * 0.5));
@@ -1209,6 +1215,7 @@ export class ProceduralFlowerModel extends THREE.Group {
   private gaussianSplatMaterial: THREE.ShaderMaterial | null = null;
   private totalGaussianSplats = 0;
   private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
+  private bloomStyle: BloomKinematicsStyle = 'classic-cupped';
   private currentBloom01 = 0.78;
   private lastForceFieldState: BloomForceFieldState =
     computeBloomForceFieldDamping(0.78, 0, 0, 0);
@@ -1241,6 +1248,14 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.buildArticulated3DGaussianSplatField();
     this.setGaussianSplatMode('hybrid-3dgs');
     this.setBloom(0.78, 0);
+  }
+
+  setBloomStyle(style: BloomKinematicsStyle): void {
+    this.bloomStyle = style;
+  }
+
+  getBloomStyle(): BloomKinematicsStyle {
+    return this.bloomStyle;
   }
 
   setHeadOrientation(pitchXRad: number, rollZRad: number): void {
@@ -1374,55 +1389,11 @@ export class ProceduralFlowerModel extends THREE.Group {
       0.28,
       0.16,
       0.35,
+      0,
+      0,
+      0.68,
     );
     this.geometriesToDispose.push(basalScaleGeo);
-
-    const neckBallGeo = new THREE.SphereGeometry(0.0175, 24, 24);
-    const neckBallMesh = new THREE.Mesh(neckBallGeo, stemMat);
-    neckBallMesh.position.set(0, 0.045, 0);
-    this.add(neckBallMesh);
-    this.geometriesToDispose.push(neckBallGeo);
-
-    const isMonocot =
-      this.spec.morphology === 'iris-bearded' ||
-      this.spec.morphology === 'lily-recurved' ||
-      this.spec.morphology === 'orchid-zygomorphic';
-    const outerRimR = isMonocot
-      ? 0.032
-      : Math.min(0.088, envelope.sepalRadius + 0.005);
-    const recepPoints = [
-      new THREE.Vector2(0.015, -0.008),
-      new THREE.Vector2(0.022, 0.0),
-      new THREE.Vector2(outerRimR * 0.72, 0.006),
-      new THREE.Vector2(outerRimR + 0.002, 0.014),
-      new THREE.Vector2(outerRimR * 0.9, 0.022),
-      new THREE.Vector2(0.012, 0.02),
-    ];
-    const recepGeo = new THREE.LatheGeometry(recepPoints, 40);
-    const recepMesh = new THREE.Mesh(recepGeo, stemMat);
-    recepMesh.castShadow = true;
-    recepMesh.receiveShadow = true;
-    this.flowerHeadGroup.add(recepMesh);
-    this.geometriesToDispose.push(recepGeo);
-
-    const nectaryGeo = new THREE.TorusGeometry(
-      envelope.stamenMinRadius * 0.92,
-      0.0032,
-      12,
-      32,
-    );
-    nectaryGeo.rotateX(Math.PI / 2);
-    const nectaryMat = new THREE.MeshPhysicalMaterial({
-      color: '#a7c957',
-      roughness: 0.42,
-      sheen: 0.7,
-      sheenColor: new THREE.Color('#e9f59e'),
-    });
-    const nectaryMesh = new THREE.Mesh(nectaryGeo, nectaryMat);
-    nectaryMesh.position.y = 0.021;
-    this.flowerHeadGroup.add(nectaryMesh);
-    this.geometriesToDispose.push(nectaryGeo);
-    this.materialsToDispose.push(nectaryMat);
 
     const leafGeo = createSculptedPetalGeometry(
       0.195,
@@ -1437,18 +1408,38 @@ export class ProceduralFlowerModel extends THREE.Group {
       0.32,
       0.0035,
       1.2,
+      0.42,
+    );
+    // Sub-Calyx Pedicel Bract Leaf (花下护萼托叶/上位茎叶): Tightly clasps the base of the calyx receptacle
+    const subCalyxLeafGeo = createSculptedPetalGeometry(
+      0.128,
+      0.062,
+      0.22,
+      2.0,
+      0.0032,
+      0.01,
+      0.48,
+      0.26,
+      0.28,
+      0.38,
+      0.0025,
+      0.6,
+      0.66,
     );
     const stipuleGeo = createSculptedPetalGeometry(
-      0.038,
-      0.016,
-      0.22,
+      0.044,
+      0.022,
+      0.24,
       1.0,
       0.001,
       0,
       0.48,
       0.24,
-      0.15,
-      0.2,
+      0.18,
+      0.32,
+      0,
+      0,
+      0.68,
     );
     const leafMat = new THREE.MeshPhysicalMaterial({
       color: '#387d58',
@@ -1471,17 +1462,149 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.animatedShaderUniforms,
       0.0075,
     );
-    this.geometriesToDispose.push(leafGeo, stipuleGeo);
+    this.geometriesToDispose.push(leafGeo, subCalyxLeafGeo, stipuleGeo);
     this.materialsToDispose.push(leafMat);
     this.meshMaterialsForMode.push(leafMat);
+
+    // 1. PRECISION FUSED STEM-TO-CALYX RECEPTACLE CUP (花托与花柄无缝精密包覆杯):
+    // Extends continuously from the top of the main stem (r = 0.0138m) out to the outer
+    // sepal ring (`envelope.sepalRadius + 0.004m`) and curves up around the outermost petal
+    // bases so looking from underneath shows 100% seamless green calyx/receptacle tissue
+    // with ZERO exposed raw petal bottoms or gaps!
+    const isMonocot =
+      this.spec.morphology === 'iris-bearded' ||
+      this.spec.morphology === 'lily-recurved' ||
+      this.spec.morphology === 'orchid-zygomorphic';
+    const isSunflower = this.spec.morphology === 'sunflower-capitulum';
+    const outerRimR = isMonocot
+      ? Math.max(0.044, envelope.petalMaxRadius * 0.96)
+      : isSunflower
+        ? envelope.coreMaxRadius * 1.02
+        : envelope.petalMaxRadius * 0.98;
+    const topRimY = isSunflower ? 0.011 : 0.005;
+    const recepPoints = [
+      new THREE.Vector2(0.0136, -0.022),
+      new THREE.Vector2(0.0165, -0.013),
+      new THREE.Vector2(0.026, -0.006),
+      new THREE.Vector2(outerRimR * 0.56, -0.001),
+      new THREE.Vector2(outerRimR * 0.88, topRimY * 0.5),
+      new THREE.Vector2(outerRimR + 0.002, topRimY),
+      new THREE.Vector2(outerRimR * 0.92, topRimY + 0.002),
+      new THREE.Vector2(0.012, topRimY + 0.001),
+    ];
+    const recepGeo = new THREE.LatheGeometry(recepPoints, 48);
+    const recepMesh = new THREE.Mesh(recepGeo, leafMat);
+    recepMesh.castShadow = true;
+    recepMesh.receiveShadow = true;
+    this.flowerHeadGroup.add(recepMesh);
+    this.geometriesToDispose.push(recepGeo);
+
+    // Ribbed hypanthium / pedicel collar ring right where the stem flares into the calyx cup
+    const calyxNeckRingGeo = new THREE.TorusGeometry(0.0185, 0.0042, 14, 32);
+    calyxNeckRingGeo.rotateX(Math.PI / 2);
+    const calyxNeckRing = new THREE.Mesh(calyxNeckRingGeo, stemMat);
+    calyxNeckRing.position.set(0, -0.007, 0);
+    this.flowerHeadGroup.add(calyxNeckRing);
+    this.geometriesToDispose.push(calyxNeckRingGeo);
+
+    // 2. SUB-CALYX PEDICEL BRACT LEAVES (花萼下方的精密护萼枝叶):
+    // A whorl of 4 sculpted sub-calyx bract leaves growing directly from the pedicel-calyx
+    // junction (`y = -0.008m..0.001m`) with short clasping petioles that hug the underside
+    // of the calyx receptacle and arch gracefully outward.
+    const subCalyxPetioleCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, -0.007, -0.012),
+      new THREE.Vector3(0, -0.003, -0.024),
+      new THREE.Vector3(0, 0.002, -0.036),
+    ]);
+    const subCalyxPetioleGeo = new THREE.TubeGeometry(
+      subCalyxPetioleCurve,
+      12,
+      0.0034,
+      8,
+      false,
+    );
+    const subCalyxMidribCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0, 0.001),
+      new THREE.Vector3(0, 0.052, 0.004),
+      new THREE.Vector3(0, 0.102, 0.009),
+    ]);
+    const subCalyxMidribGeo = new THREE.TubeGeometry(
+      subCalyxMidribCurve,
+      12,
+      0.0018,
+      8,
+      false,
+    );
+    this.geometriesToDispose.push(subCalyxPetioleGeo, subCalyxMidribGeo);
+
+    const subCalyxCount = isMonocot ? 3 : 4;
+    for (let scIdx = 0; scIdx < subCalyxCount; scIdx++) {
+      const scYaw =
+        (scIdx / subCalyxCount) * Math.PI * 2 + Math.PI / subCalyxCount;
+      const scNode = new THREE.Group();
+      scNode.position.set(0, -0.002 - (scIdx % 2) * 0.003, 0);
+      scNode.rotation.y = -scYaw - Math.PI / 2;
+
+      const scPetiole = new THREE.Mesh(subCalyxPetioleGeo, stemMat);
+      scPetiole.castShadow = true;
+      scNode.add(scPetiole);
+
+      const scBladePivot = new THREE.Group();
+      scBladePivot.position.set(0, 0.002, -0.034);
+      scBladePivot.scale.setScalar(scIdx % 2 === 0 ? 0.96 : 0.86);
+
+      const scLeaf = new THREE.Mesh(subCalyxLeafGeo, leafMat);
+      const basePitch = -1.16 - (scIdx % 2) * 0.08;
+      const baseRoll = (scIdx % 2 === 0 ? 1 : -1) * 0.04;
+      scLeaf.rotation.x = basePitch;
+      scLeaf.rotation.z = baseRoll;
+      scLeaf.castShadow = true;
+      scLeaf.receiveShadow = true;
+
+      const scMidrib = new THREE.Mesh(subCalyxMidribGeo, stemMat);
+      scLeaf.add(scMidrib);
+
+      scBladePivot.add(scLeaf);
+      scNode.add(scBladePivot);
+      this.flowerHeadGroup.add(scNode);
+
+      this.leafPivots.push({
+        bladePivot: scBladePivot,
+        leafMesh: scLeaf,
+        basePitch,
+        baseRoll,
+        phaseOffset: scIdx * 0.95 + 0.4,
+      });
+    }
+
+    if (!isSunflower) {
+      const nectaryGeo = new THREE.TorusGeometry(
+        envelope.stamenMinRadius * 0.88,
+        0.0028,
+        12,
+        32,
+      );
+      nectaryGeo.rotateX(Math.PI / 2);
+      const nectaryMat = new THREE.MeshPhysicalMaterial({
+        color: '#d97706',
+        roughness: 0.42,
+        sheen: 0.7,
+        sheenColor: new THREE.Color('#fef08a'),
+      });
+      const nectaryMesh = new THREE.Mesh(nectaryGeo, nectaryMat);
+      nectaryMesh.position.y = 0.012;
+      this.flowerHeadGroup.add(nectaryMesh);
+      this.geometriesToDispose.push(nectaryGeo);
+      this.materialsToDispose.push(nectaryMat);
+    }
 
     for (let bIdx = 0; bIdx < 3; bIdx++) {
       const bYaw = (bIdx / 3) * Math.PI * 2 + 0.4;
       const bPivot = new THREE.Group();
       bPivot.position.set(
-        Math.cos(bYaw) * 0.018,
+        Math.cos(bYaw) * 0.016,
         -0.292,
-        Math.sin(bYaw) * 0.018,
+        Math.sin(bYaw) * 0.016,
       );
       bPivot.rotation.y = -bYaw - Math.PI / 2;
       const bMesh = new THREE.Mesh(basalScaleGeo, leafMat);
@@ -1490,19 +1613,20 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.add(bPivot);
     }
 
-    const nodalRingGeo = new THREE.TorusGeometry(0.0145, 0.0034, 12, 24);
+    const nodalRingGeo = new THREE.TorusGeometry(0.0145, 0.0036, 12, 24);
     nodalRingGeo.rotateX(Math.PI / 2);
 
     // Note: nodeGroup.rotation.y = -cfg.yaw - Math.PI / 2 makes -Z the OUTWARD radial direction from the stem!
+    // Start the petiole inside the stem core (`z = -0.006`) so there is zero gap at the stem node.
     const petioleCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, 0.002, -0.011),
-      new THREE.Vector3(0, 0.005, -0.027),
-      new THREE.Vector3(0, 0.006, -0.042),
+      new THREE.Vector3(0, -0.002, -0.006),
+      new THREE.Vector3(0, 0.004, -0.022),
+      new THREE.Vector3(0, 0.008, -0.038),
     ]);
     const petioleGeo = new THREE.TubeGeometry(
       petioleCurve,
       14,
-      0.0036,
+      0.0038,
       10,
       false,
     );
@@ -1525,9 +1649,9 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
 
     const leafNodeConfigs = [
-      {tStem: 0.72, yaw: 0.45, pitch: -1.02, roll: 0.06, scale: 0.92},
-      {tStem: 0.54, yaw: -2.25, pitch: -1.08, roll: -0.07, scale: 1.04},
-      {tStem: 0.34, yaw: 2.15, pitch: -1.06, roll: 0.05, scale: 0.96},
+      {tStem: 0.76, yaw: 0.45, pitch: -1.04, roll: 0.05, scale: 0.94},
+      {tStem: 0.56, yaw: -2.25, pitch: -1.08, roll: -0.06, scale: 1.04},
+      {tStem: 0.36, yaw: 2.15, pitch: -1.06, roll: 0.05, scale: 0.96},
       {tStem: 0.18, yaw: -0.95, pitch: -1.12, roll: -0.05, scale: 0.86},
     ];
 
@@ -1547,19 +1671,19 @@ export class ProceduralFlowerModel extends THREE.Group {
       nodeGroup.add(petiole);
 
       const axilBud = new THREE.Mesh(axilBudGeo, leafMat);
-      axilBud.position.set(0, 0.005, -0.015);
+      axilBud.position.set(0, 0.004, -0.013);
       axilBud.rotation.x = -0.38;
       nodeGroup.add(axilBud);
 
       for (const side of [-1, 1]) {
         const stip = new THREE.Mesh(stipuleGeo, leafMat);
-        stip.position.set(side * 0.008, 0.002, -0.014);
-        stip.rotation.set(-0.48, side * -0.42, side * 0.32);
+        stip.position.set(side * 0.007, 0.002, -0.012);
+        stip.rotation.set(-0.46, side * -0.38, side * 0.28);
         nodeGroup.add(stip);
       }
 
       const bladePivot = new THREE.Group();
-      bladePivot.position.set(0, 0.006, -0.041);
+      bladePivot.position.set(0, 0.008, -0.036);
       bladePivot.scale.setScalar(cfg.scale);
 
       const leaf = new THREE.Mesh(leafGeo, leafMat);
@@ -1584,24 +1708,27 @@ export class ProceduralFlowerModel extends THREE.Group {
       });
     });
 
-    // 5. SEAMLESS COMPANION BUD SIDE BRANCH
-    const forkOrigin = this.mainStemCurve.getPointAt(0.44);
+    // 5. SEAMLESS COMPANION BUD SIDE BRANCH & PRECISION CALYX CONNECTION
+    const forkOrigin = this.mainStemCurve.getPointAt(0.46);
     const forkCollar = new THREE.Mesh(nodalRingGeo, stemMat);
     forkCollar.position.copy(forkOrigin);
     this.add(forkCollar);
 
-    const [budX, budY, budZ] = envelope.companionBudPosition;
+    const [rawBudX, rawBudY, rawBudZ] = envelope.companionBudPosition;
+    const budX = rawBudX * 1.24;
+    const budY = rawBudY + 0.022;
+    const budZ = rawBudZ * 1.22;
     const budTargetPos = new THREE.Vector3(budX, budY, budZ);
     const sideBranchCurve = new THREE.CatmullRomCurve3([
-      forkOrigin.clone().add(new THREE.Vector3(0.006, 0, 0)),
-      new THREE.Vector3(budX * 0.46, forkOrigin.y - 0.01, budZ * 0.48),
-      new THREE.Vector3(budX * 0.84, budY - 0.048, budZ * 0.86),
+      forkOrigin.clone(),
+      new THREE.Vector3(budX * 0.45, forkOrigin.y + 0.008, budZ * 0.46),
+      new THREE.Vector3(budX * 0.84, budY - 0.042, budZ * 0.86),
       budTargetPos,
     ]);
     const sideStemGeo = new THREE.TubeGeometry(
       sideBranchCurve,
       28,
-      0.0058,
+      0.0062,
       14,
       false,
     );
@@ -1610,13 +1737,14 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.add(sideStemMesh);
     this.geometriesToDispose.push(sideStemGeo);
 
+    // Fork bract leaf snugly cradling the side-branch junction (oriented outward along branch azimuth)
+    const forkAzimuth = Math.atan2(budZ, budX);
     const forkBractPivot = new THREE.Group();
-    forkBractPivot.position
-      .copy(forkOrigin)
-      .add(new THREE.Vector3(0.014, -0.004, 0));
-    forkBractPivot.rotation.y = -Math.PI / 2;
+    forkBractPivot.position.copy(forkOrigin);
+    forkBractPivot.rotation.y = -forkAzimuth - Math.PI / 2;
     const forkBract = new THREE.Mesh(basalScaleGeo, leafMat);
-    forkBract.rotation.x = -0.95;
+    forkBract.position.set(0, -0.002, -0.011);
+    forkBract.rotation.x = -0.68;
     forkBractPivot.add(forkBract);
     this.add(forkBractPivot);
 
@@ -1627,36 +1755,87 @@ export class ProceduralFlowerModel extends THREE.Group {
       endTangent,
     );
 
+    // Precision companion calyx cup that fully encloses the companion flower's base
     const budReceptacleGeo = new THREE.LatheGeometry(
       [
-        new THREE.Vector2(0.0058, -0.004),
-        new THREE.Vector2(0.011, 0.006),
-        new THREE.Vector2(0.019, 0.016),
-        new THREE.Vector2(0.016, 0.024),
+        new THREE.Vector2(0.006, -0.008),
+        new THREE.Vector2(0.011, -0.001),
+        new THREE.Vector2(0.022, 0.005),
+        new THREE.Vector2(0.025, 0.011),
+        new THREE.Vector2(0.02, 0.014),
+        new THREE.Vector2(0.008, 0.013),
       ],
-      24,
+      28,
     );
-    const budReceptacle = new THREE.Mesh(budReceptacleGeo, stemMat);
+    const budReceptacle = new THREE.Mesh(budReceptacleGeo, leafMat);
     this.companionBudGroup.add(budReceptacle);
     this.geometriesToDispose.push(budReceptacleGeo);
 
-    for (let s = 0; s < 3; s++) {
-      const sYaw = (s / 3) * Math.PI * 2;
-      const sPiv = new THREE.Group();
-      sPiv.position.set(
-        Math.cos(sYaw) * 0.017,
-        0.014,
-        Math.sin(sYaw) * 0.017,
+    // 2 opposite sub-calyx bract leaves right below the companion bud receptacle
+    for (let bLeafIdx = 0; bLeafIdx < 2; bLeafIdx++) {
+      const bLeafYaw = bLeafIdx * Math.PI + 0.4;
+      const bLeafPiv = new THREE.Group();
+      bLeafPiv.position.set(
+        Math.cos(bLeafYaw) * 0.009,
+        -0.003,
+        Math.sin(bLeafYaw) * 0.009,
       );
-      sPiv.rotation.y = -sYaw - Math.PI / 2;
-      const sMesh = new THREE.Mesh(stipuleGeo, leafMat);
-      sMesh.scale.setScalar(1.45);
-      sMesh.rotation.x = -0.36;
-      sPiv.add(sMesh);
-      this.companionBudGroup.add(sPiv);
+      bLeafPiv.rotation.y = -bLeafYaw - Math.PI / 2;
+      const bLeafMesh = new THREE.Mesh(basalScaleGeo, leafMat);
+      bLeafMesh.scale.setScalar(0.82);
+      bLeafMesh.rotation.x = -1.02;
+      bLeafPiv.add(bLeafMesh);
+      this.companionBudGroup.add(bLeafPiv);
     }
 
-    // Nascent Companion Flower Bud (5 non-intersecting cupped petals that never cross the center axis)
+    // 6 overlapping broad-base green calyx sepals on the companion bud (can also open in heliotropic mode!)
+    const budSepalGeo = createSculptedPetalGeometry(
+      0.052,
+      0.028,
+      0.28,
+      1.0,
+      0.001,
+      0,
+      0.46,
+      0.26,
+      0.12,
+      0.38,
+      0,
+      0.2,
+      0.74,
+    );
+    this.geometriesToDispose.push(budSepalGeo);
+
+    for (let s = 0; s < 6; s++) {
+      const sYaw = (s / 6) * Math.PI * 2;
+      const sPiv = new THREE.Group();
+      sPiv.position.set(
+        Math.cos(sYaw) * 0.02,
+        0.006,
+        Math.sin(sYaw) * 0.02,
+      );
+      const baseYaw = -sYaw - Math.PI / 2;
+      sPiv.rotation.y = baseYaw;
+      const sMesh = new THREE.Mesh(budSepalGeo, leafMat);
+      sMesh.castShadow = true;
+      sPiv.add(sMesh);
+      this.companionBudGroup.add(sPiv);
+      this.companionBudPivots.push({
+        pivot: sPiv,
+        mesh: sMesh,
+        normalizedRank: -0.8,
+        closedPitch: 0.28,
+        openPitch: 0.85,
+        baseYaw,
+        baseRoll: 0,
+        naturalScaleX: 1.0,
+        naturalScaleY: 1.0,
+        phaseOffset: s * 0.5,
+      });
+    }
+
+    // Companion Flower Corolla (8 concentric petals: stays a cupped bud in 'classic-cupped' mode,
+    // or blooms into a full secondary flower in 'heliotropic-reflex' mode!)
     const budPetalMat = new THREE.MeshPhysicalMaterial({
       map: getSpeciesPetalTexture(this.spec),
       vertexColors: true,
@@ -1680,43 +1859,44 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
 
     const budPetalGeo = createSculptedPetalGeometry(
-      0.078,
-      0.042,
-      0.20,
-      1.6,
-      0.002,
+      0.072,
+      0.038,
+      0.26,
+      1.4,
+      0.0015,
       0,
-      0.56,
+      0.54,
       0.22,
-      0.10,
-      0.62,
+      0.1,
+      0.64,
       0,
       0.4,
+      0.26,
     );
     this.geometriesToDispose.push(budPetalGeo);
     this.materialsToDispose.push(budPetalMat);
     this.meshMaterialsForMode.push(budPetalMat);
 
-    // 2 Inner + 3 Outer non-intersecting cupped bud petals (outward pitch 0.24..0.76 rad)
-    for (let i = 0; i < 5; i++) {
-      const isInner = i < 2;
-      const rank = isInner ? 0.25 : 0.85;
+    // 3 Inner + 5 Outer non-intersecting cupped companion petals
+    for (let i = 0; i < 8; i++) {
+      const isInner = i < 3;
+      const rank = isInner ? 0.28 : 0.82;
       const yaw = isInner
-        ? i * Math.PI + 0.35
-        : ((i - 2) / 3) * Math.PI * 2;
-      const r = isInner ? 0.012 : 0.022;
+        ? (i / 3) * Math.PI * 2 + 0.35
+        : ((i - 3) / 5) * Math.PI * 2;
+      const r = isInner ? 0.011 : 0.017;
       const p = new THREE.Group();
       p.position.set(
         Math.cos(yaw) * r,
-        isInner ? 0.021 : 0.017,
+        isInner ? 0.016 : 0.012,
         Math.sin(yaw) * r,
       );
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 3.1) * 0.03;
+      const baseRoll = organicNoise(i * 3.1) * 0.02;
       p.rotation.y = baseYaw;
       const m = new THREE.Mesh(budPetalGeo, budPetalMat);
-      const closedPitch = isInner ? 0.24 : 0.42;
-      const openPitch = isInner ? 0.44 : 0.76;
+      const closedPitch = isInner ? 0.16 : 0.26;
+      const openPitch = isInner ? 0.46 : 0.68;
       m.rotation.x = -closedPitch;
       m.rotation.z = baseRoll;
       m.castShadow = true;
@@ -2246,21 +2426,26 @@ export class ProceduralFlowerModel extends THREE.Group {
       morph === 'iris-bearded' ||
       morph === 'lily-recurved' ||
       morph === 'orchid-zygomorphic';
-    const sepalCount =
-      morph === 'sunflower-capitulum' ? 24 : isMonocot ? 3 : 6;
+    const isSunflower = morph === 'sunflower-capitulum';
+    // Broad-clawed Calyx Sepals (`basalClawWidth = 0.72`, `cupDepth = 0.08`, `recurvedFactor = 0.32`):
+    // Low transverse margin curl (`cupDepth = 0.08`) + strong downward longitudinal arch (`recurvedFactor = 0.32`)
+    // ensures sepal side margins never curl upward (+Z) through the gaps between narrow sunflower ray florets,
+    // while their broad bases form a continuous star-shaped green calyx fused into the green receptacle rim!
+    const sepalCount = isSunflower ? 12 : isMonocot ? 3 : 6;
     const sepalGeo = createSculptedPetalGeometry(
-      isMonocot ? 0.072 : 0.118,
-      isMonocot ? 0.032 : 0.052,
-      0.14,
+      isMonocot ? 0.088 : isSunflower ? 0.086 : 0.124,
+      isMonocot ? 0.044 : isSunflower ? 0.042 : 0.066,
+      0.08,
       1.2,
-      0.0015,
+      0.001,
       0,
-      0.48,
+      0.44,
       0.26,
-      0.06,
-      0.28,
+      0.32,
+      0.32,
       0,
       0.3,
+      0.72,
     );
     const sepalMat = new THREE.MeshPhysicalMaterial({
       color: '#3a825e',
@@ -2287,21 +2472,30 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.materialsToDispose.push(sepalMat);
     this.meshMaterialsForMode.push(sepalMat);
 
-    // Calyx Sepals (花萼): Positioned strictly OUTSIDE `envelope.sepalRadius` (+15mm..+21mm outside petals)
-    // and split into two staggered sub-whorls (`normalizedRank = -0.5` and `-1.0`) so sepals never overlap or pierce petals!
+    // Calyx Sepals (花萼): Anchored seamlessly inside the green receptacle rim
+    // so their broad claws fuse with the receptacle cup and never float or pierce petals!
     for (let i = 0; i < sepalCount; i++) {
       const isOuterCalyxRing = i % 2 === 1;
-      const yawOffset = isMonocot ? Math.PI / 3 : isOuterCalyxRing ? 0.05 : 0;
+      const yawOffset = isMonocot
+        ? Math.PI / 3
+        : isSunflower
+          ? Math.PI / (sepalCount * 2)
+          : isOuterCalyxRing
+            ? 0.04
+            : 0;
       const yaw = (i / sepalCount) * Math.PI * 2 + yawOffset;
-      const rad = envelope.sepalRadius + (isOuterCalyxRing ? 0.006 : 0.0);
+      const baseSepalRad = isSunflower
+        ? envelope.coreMaxRadius * 0.96
+        : envelope.petalMaxRadius * 0.88;
+      const rad = baseSepalRad + (isOuterCalyxRing ? 0.004 : 0.0);
       const pivot = new THREE.Group();
       pivot.position.set(
         Math.cos(yaw) * rad,
-        envelope.sepalY - (isOuterCalyxRing ? 0.003 : 0),
+        (isSunflower ? 0.002 : 0.003) - (isOuterCalyxRing ? 0.002 : 0),
         Math.sin(yaw) * rad,
       );
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 2.9) * 0.04;
+      const baseRoll = organicNoise(i * 2.9) * 0.025;
       pivot.rotation.y = baseYaw;
 
       const mesh = new THREE.Mesh(sepalGeo, sepalMat);
@@ -2315,12 +2509,16 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: isOuterCalyxRing ? -1.0 : -0.5,
-        closedPitch: envelope.sepalClosedPitch + (isOuterCalyxRing ? 0.07 : 0),
-        openPitch: envelope.sepalOpenPitch + (isOuterCalyxRing ? 0.08 : 0),
+        closedPitch:
+          (isSunflower ? 0.34 : envelope.sepalClosedPitch) +
+          (isOuterCalyxRing ? 0.06 : 0),
+        openPitch:
+          (isSunflower ? 1.62 : envelope.sepalOpenPitch) +
+          (isOuterCalyxRing ? 0.07 : 0),
         baseYaw,
         baseRoll,
-        naturalScaleX: isOuterCalyxRing ? 1.02 : 0.94,
-        naturalScaleY: isOuterCalyxRing ? 1.0 : 0.95,
+        naturalScaleX: isOuterCalyxRing ? 1.0 : 0.95,
+        naturalScaleY: isOuterCalyxRing ? 1.0 : 0.96,
         phaseOffset: i * 0.7,
       });
     }
@@ -2373,6 +2571,11 @@ export class ProceduralFlowerModel extends THREE.Group {
       return;
     }
 
+    if (morph === 'sunflower-capitulum') {
+      this.buildSunflowerCorolla(petalMaterial, envelope);
+      return;
+    }
+
     const totalPetals =
       this.spec.outerPetals +
       this.spec.midOuterPetals +
@@ -2383,19 +2586,15 @@ export class ProceduralFlowerModel extends THREE.Group {
     const widthBias =
       morph === 'waterlily-stellate'
         ? 0.44
-        : morph === 'sunflower-capitulum'
-          ? 0.48
-          : morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
-            ? 0.68
-            : 0.62;
+        : morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
+          ? 0.68
+          : 0.62;
     const tipRoundness =
       morph === 'peony-ruffled' || morph === 'camellia-fibonacci'
         ? 0.94
         : morph === 'lotus-pod'
           ? 0.68
-          : morph === 'sunflower-capitulum'
-            ? 0.28
-            : 0.18;
+          : 0.18;
     const recurve =
       morph === 'peony-ruffled'
         ? 0.24
@@ -2406,22 +2605,15 @@ export class ProceduralFlowerModel extends THREE.Group {
     const tierSamples = [0.12, 0.24, 0.38, 0.52, 0.66, 0.78, 0.9, 1.0];
     const tierGeometries = tierSamples.map((tierT, idx) => {
       const lenScale =
-        morph === 'sunflower-capitulum'
-          ? 0.88 + 0.16 * Math.sin(tierT * Math.PI)
-          : 0.62 + 0.42 * Math.sin(Math.pow(tierT, 0.68) * (Math.PI / 2));
-      const widScale =
-        morph === 'sunflower-capitulum'
-          ? 0.88 + 0.2 * tierT
-          : 0.76 + 0.28 * tierT;
+        0.62 + 0.42 * Math.sin(Math.pow(tierT, 0.68) * (Math.PI / 2));
+      const widScale = 0.76 + 0.28 * tierT;
       const aoFactor = 0.48 - tierT * 0.18;
       const tierCup = this.spec.cupDepth * (1.12 - tierT * 0.24);
       const tierRecurve = recurve * Math.pow(tierT, 1.35);
       const notchDepth =
-        morph === 'sunflower-capitulum'
-          ? 0.016
-          : morph === 'peony-ruffled'
-            ? this.spec.tipNotchDepth * (0.8 + 0.6 * tierT)
-            : this.spec.tipNotchDepth;
+        morph === 'peony-ruffled'
+          ? this.spec.tipNotchDepth * (0.8 + 0.6 * tierT)
+          : this.spec.tipNotchDepth;
       const geo = createSculptedPetalGeometry(
         this.spec.petalLength * lenScale,
         this.spec.petalWidth * widScale,
@@ -2440,30 +2632,18 @@ export class ProceduralFlowerModel extends THREE.Group {
       return geo;
     });
 
-    // For Sunflower capitulum, ray florets attach strictly around the outer rim of the seed disc
-    const minR =
-      morph === 'sunflower-capitulum'
-        ? envelope.coreMaxRadius * 0.92
-        : envelope.petalMinRadius;
-    const maxR =
-      morph === 'sunflower-capitulum'
-        ? envelope.coreMaxRadius * 1.05
-        : envelope.petalMaxRadius;
+    const minR = envelope.petalMinRadius;
+    const maxR = envelope.petalMaxRadius;
 
     for (let i = 0; i < totalPetals; i++) {
       const rank01 = i / Math.max(1, totalPetals - 1);
       const yawJitter = organicNoise(i * 3.73) * 0.024;
-      const yaw =
-        morph === 'sunflower-capitulum'
-          ? (i / totalPetals) * Math.PI * 2 + (i % 2) * 0.055 + yawJitter * 0.5
-          : i * GOLDEN_ANGLE + yawJitter;
+      const yaw = i * GOLDEN_ANGLE + yawJitter;
       // Strictly linear radial shell progression guarantees constant inter-layer clearance at bloom = 0%
       const r = minR + (maxR - minR) * rank01;
       const yOffset =
-        morph === 'sunflower-capitulum'
-          ? 0.028 - rank01 * 0.008
-          : envelope.petalTopY -
-            (envelope.petalTopY - envelope.petalBottomY) * rank01;
+        envelope.petalTopY -
+        (envelope.petalTopY - envelope.petalBottomY) * rank01;
 
       const tierIdx = Math.min(
         tierGeometries.length - 1,
@@ -2492,12 +2672,10 @@ export class ProceduralFlowerModel extends THREE.Group {
           envelope.petalClosedPitchRange[0]) *
           rank01;
       const openPitch =
-        morph === 'sunflower-capitulum'
-          ? 1.38 + rank01 * 0.24
-          : envelope.petalOpenPitchRange[0] +
-            (envelope.petalOpenPitchRange[1] -
-              envelope.petalOpenPitchRange[0]) *
-              Math.pow(rank01, 1.02);
+        envelope.petalOpenPitchRange[0] +
+        (envelope.petalOpenPitchRange[1] -
+          envelope.petalOpenPitchRange[0]) *
+          Math.pow(rank01, 1.02);
 
       this.petalPivots.push({
         pivot,
@@ -2512,6 +2690,115 @@ export class ProceduralFlowerModel extends THREE.Group {
         phaseOffset: i * 0.47,
       });
     }
+  }
+
+  /**
+   * Dedicated 2-Whorl Staggered Ray-Floret Corolla for Helianthus annuus (向日葵双轮交错舌状花冠):
+   * - 12 inner ray florets + 12 outer ray florets (24 total, offset by exact half-step PI/12 = 15 deg)
+   * - Slender lanceolate ray blades (`width = 0.052m`, `length = 0.225m`) with distinct radial & vertical
+   *   separation between inner and outer rings so petals NEVER overlap or bunch up in bud (0%) or bloom (100%)!
+   */
+  private buildSunflowerCorolla(
+    petalMaterial: THREE.MeshPhysicalMaterial,
+    envelope: FloralShellEnvelope,
+  ): void {
+    const innerCount = this.spec.midOuterPetals || 12;
+    const outerCount = this.spec.outerPetals || 12;
+
+    const geoInner = createSculptedPetalGeometry(
+      this.spec.petalLength * 0.95,
+      this.spec.petalWidth * 1.08,
+      0.22,
+      this.spec.ruffleFrequency,
+      this.spec.ruffleAmplitude * 0.8,
+      0.012,
+      0.48,
+      0.26,
+      0.08,
+      0.32,
+      0,
+      0.4,
+      0.24,
+    );
+    const geoOuter = createSculptedPetalGeometry(
+      this.spec.petalLength * 1.02,
+      this.spec.petalWidth * 1.15,
+      0.2,
+      this.spec.ruffleFrequency,
+      this.spec.ruffleAmplitude,
+      0.014,
+      0.5,
+      0.22,
+      0.12,
+      0.34,
+      0,
+      1.2,
+      0.24,
+    );
+    this.geometriesToDispose.push(geoInner, geoOuter);
+
+    const rings = [
+      {
+        count: innerCount,
+        isOuter: false,
+        geo: geoInner,
+        radius: envelope.coreMaxRadius * 0.94,
+        yOffset: 0.028,
+        rank01: 0.36,
+        closedPitch: 0.06,
+        openPitch: 1.28,
+        yawOffset: 0,
+      },
+      {
+        count: outerCount,
+        isOuter: true,
+        geo: geoOuter,
+        radius: envelope.coreMaxRadius * 1.01,
+        yOffset: 0.023,
+        rank01: 0.88,
+        closedPitch: 0.16,
+        openPitch: 1.42,
+        yawOffset: Math.PI / outerCount, // Exact half-step (15 deg) stagger between inner and outer rings!
+      },
+    ];
+
+    rings.forEach((ringCfg, ringIdx) => {
+      for (let i = 0; i < ringCfg.count; i++) {
+        const yaw =
+          (i / ringCfg.count) * Math.PI * 2 +
+          ringCfg.yawOffset +
+          organicNoise((ringIdx * 12 + i) * 3.1) * 0.012;
+        const pivot = new THREE.Group();
+        pivot.position.set(
+          Math.cos(yaw) * ringCfg.radius,
+          ringCfg.yOffset,
+          Math.sin(yaw) * ringCfg.radius,
+        );
+        const baseYaw = -yaw - Math.PI / 2;
+        const baseRoll = organicNoise((ringIdx * 12 + i) * 5.3) * 0.03;
+        pivot.rotation.y = baseYaw;
+
+        const mesh = new THREE.Mesh(ringCfg.geo, petalMaterial);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.rotation.z = 0;
+        pivot.add(mesh);
+        this.flowerHeadGroup.add(pivot);
+
+        this.petalPivots.push({
+          pivot,
+          mesh,
+          normalizedRank: ringCfg.rank01,
+          closedPitch: ringCfg.closedPitch,
+          openPitch: ringCfg.openPitch,
+          baseYaw,
+          baseRoll,
+          naturalScaleX: 0.96 + organicNoise(i * 4.7) * 0.04,
+          naturalScaleY: 0.97 + organicNoise(i * 6.9) * 0.03,
+          phaseOffset: i * 0.52 + ringIdx * 0.8,
+        });
+      }
+    });
   }
 
   private buildLilyWhorls(petalMaterial: THREE.MeshPhysicalMaterial): void {
@@ -3567,10 +3854,8 @@ export class ProceduralFlowerModel extends THREE.Group {
       aMat.emissiveIntensity = 0.03 + bloomDetails.antherDehiscenceGlow * 0.11;
     }
 
-    // Whole-head physiological breathing lift & gentle sway
-    const headBreathLift =
-      Math.sin(elapsedSec * 1.48) * 0.0035 * damping.splatKineticCompression;
-    this.flowerHeadGroup.position.set(0, 0.045 + headBreathLift, 0);
+    // Whole-head physiological breathing sway (position stays locked to stem apex (0, 0.045, 0) so stem & calyx never separate!)
+    this.flowerHeadGroup.position.set(0, 0.045, 0);
     this.flowerHeadGroup.rotation.x =
       0.16 +
       (Math.cos(elapsedSec * 1.15) * 0.015 +
@@ -3601,6 +3886,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         baseYaw: item.baseYaw,
         baseRoll: item.baseRoll,
         kineticDamping01: kineticDamp,
+        bloomStyle: this.bloomStyle,
       });
 
       item.mesh.rotation.x = -pose.pitchRad;
@@ -3609,13 +3895,20 @@ export class ProceduralFlowerModel extends THREE.Group {
       item.pivot.rotation.y = pose.yawRad;
     }
 
-    // 2. Companion Side Bud Petals (synchronized breathing & non-intersecting cupped pose)
+    // 2. Companion Side Flower / Bud Petals:
+    // - In 'classic-cupped' mode: stays a gentle cupped companion bud (`b * 0.38`)
+    // - In 'heliotropic-reflex' mode: blooms in tandem (`b * 1.0`, `openPitch * 1.85`) into a full secondary blossom!
+    const isTwinBloom = this.bloomStyle === 'heliotropic-reflex';
     for (const budItem of this.companionBudPivots) {
+      const effectiveOpenPitch =
+        isTwinBloom && budItem.normalizedRank >= 0
+          ? budItem.openPitch * 1.85
+          : budItem.openPitch;
       const budPose = evaluateOrganBudToBloomPose({
         closedPitch: budItem.closedPitch,
-        openPitch: budItem.openPitch,
+        openPitch: effectiveOpenPitch,
         normalizedRank: budItem.normalizedRank,
-        bloom01: b * 0.85,
+        bloom01: isTwinBloom ? b : b * 0.38,
         elapsedSec,
         phaseOffset: budItem.phaseOffset,
         naturalScaleX: budItem.naturalScaleX,
@@ -3623,6 +3916,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         baseYaw: budItem.baseYaw,
         baseRoll: budItem.baseRoll,
         kineticDamping01: kineticDamp,
+        bloomStyle: this.bloomStyle,
       });
       budItem.mesh.rotation.x = -budPose.pitchRad;
       budItem.mesh.rotation.z = budPose.rollRad;
@@ -3634,11 +3928,16 @@ export class ProceduralFlowerModel extends THREE.Group {
     for (const st of this.stamenPivots) {
       const stRank = st.normalizedRank ?? 0.5;
       // Outer stamens (stRank -> 1) uncurl slightly earlier than innermost stamens (stRank -> 0)
-      const staggeredBloom = clamp(b * (0.9 + 0.18 * stRank) - (1 - stRank) * 0.06, 0, 1);
+      const staggeredBloom = clamp(
+        b * (0.9 + 0.18 * stRank) - (1 - stRank) * 0.06,
+        0,
+        1,
+      );
       const baseStamenPitch = evaluateStamenPitchAtBloom(
         st.closedPitch,
         st.openPitch,
         staggeredBloom,
+        this.bloomStyle,
       );
       const pitchSway =
         (Math.sin(elapsedSec * 2.6 + st.phaseOffset) * 0.04 +

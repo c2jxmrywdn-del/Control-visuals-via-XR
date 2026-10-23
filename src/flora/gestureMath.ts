@@ -267,24 +267,24 @@ export const FLOWER_LIBRARY: FlowerSpec[] = [
     binomial: 'Helianthus annuus',
     meaningZh: '炽热 · 追光 · 信念',
     meaningEn: 'Brilliance · Devotion · Vitality',
-    poemZh: '菊科典型头状花序，中央百粒斐波那契螺旋管状花盘与外围金黄舌状花。',
+    poemZh: '菊科典型头状花序，中央百粒斐波那契螺旋管状花盘与双轮交错金黄舌状花。',
     primaryColor: '#ffb703',
     secondaryColor: '#ffe169',
     throatColor: '#cb6d07',
     coreColor: '#4a2511',
     stamenColor: '#d97706',
     stemColor: '#3a6b3c',
-    outerPetals: 18,
-    midOuterPetals: 18,
-    midPetals: 16,
+    outerPetals: 12,
+    midOuterPetals: 12,
+    midPetals: 0,
     innerPetals: 0,
     centerPetals: 0,
-    petalLength: 0.25,
-    petalWidth: 0.078,
-    cupDepth: 0.1,
+    petalLength: 0.225,
+    petalWidth: 0.052,
+    cupDepth: 0.09,
     ruffleFrequency: 1.5,
-    ruffleAmplitude: 0.003,
-    maxOpenAngleRad: 1.72,
+    ruffleAmplitude: 0.0025,
+    maxOpenAngleRad: 1.66,
     tipNotchDepth: 0.0,
     speckleIntensity: 0.0,
   },
@@ -1879,6 +1879,8 @@ export function computeFloralShellEnvelope(
   };
 }
 
+export type BloomKinematicsStyle = 'classic-cupped' | 'heliotropic-reflex';
+
 function quinticSmoothstep(t: number): number {
   const c = clamp(t, 0, 1);
   return c * c * c * (c * (c * 6 - 15) + 10);
@@ -1887,10 +1889,12 @@ function quinticSmoothstep(t: number): number {
 /**
  * Evaluates a strictly monotonic, C2-continuous Quintic Sigmoidal opening pitch angle
  * for a petal (`normalizedRank in [0, 1]`) or calyx sepal (`normalizedRank < 0`) at `bloom01 in [0, 1]`.
- * - Calyx sepals (`normalizedRank < 0`) unclasp first during early bud stage `[0..0.32]` so the green calyx
- *   clears the path before the outer petals descend.
- * - Outer guard petals (`normalizedRank -> 1`) peel open smoothly from `b = 0`.
- * - Inner heart petals (`normalizedRank -> 0`) stay cupped in the early bud stage and unfurl up to `b = 1`.
+ * Supports two real-world botanical blooming situations (`bloomStyle`):
+ * - `'classic-cupped'` (层进杯状舒展): Calyx sepals unclasp first (`0..0.32`), outer guard petals peel open
+ *   from `b = 0`, and inner heart petals stay cupped until `b = 0.22..1.0` to form a classic 3D chalice.
+ * - `'heliotropic-reflex'` (向光反卷全展): Midday heliotropic full anthesis where inner heart petals unlock
+ *   early (`b = 0.06`), outer/mid petals arch into a wide sunlit reflexed canopy (`+0.16..0.22 rad`), and
+ *   calyx sepals fold further downward (`+0.20 rad`) to support the reflexed corolla from underneath.
  * Strictly preserves `innerPitch < midPitch < outerPitch < sepalPitch` at every `b in [0, 1]`.
  */
 export function evaluateOrganPitchAtBloom(
@@ -1898,35 +1902,50 @@ export function evaluateOrganPitchAtBloom(
   openPitch: number,
   normalizedRank: number,
   bloom01: number,
+  bloomStyle: BloomKinematicsStyle = 'classic-cupped',
 ): number {
   const b = clamp(bloom01, 0, 1);
+  const isReflex = bloomStyle === 'heliotropic-reflex';
+
   if (normalizedRank < 0) {
     const isOuterCalyx = normalizedRank <= -0.8;
     const sepalStart = isOuterCalyx ? 0.0 : 0.02;
-    const sepalSpan = isOuterCalyx ? 0.28 : 0.32;
+    const sepalSpan = isReflex
+      ? isOuterCalyx
+        ? 0.22
+        : 0.26
+      : isOuterCalyx
+        ? 0.28
+        : 0.32;
     const sepalP = clamp((b - sepalStart) / sepalSpan, 0, 1);
     const smoothS = quinticSmoothstep(sepalP);
-    return closedPitch + (openPitch - closedPitch) * smoothS;
+    const reflexSepalBoost = isReflex ? 0.20 * quinticSmoothstep(b) : 0;
+    return closedPitch + (openPitch - closedPitch) * smoothS + reflexSepalBoost;
   }
 
   const rank = clamp(normalizedRank, 0, 1);
-  // Outer petals (rank=1) start opening immediately at b=0; inner heart petals (rank=0) start at b=0.22
-  const startAt = (1 - rank) * 0.22;
+  const startAt = (1 - rank) * (isReflex ? 0.08 : 0.22);
   const span = 1 - startAt;
   const rawP = clamp((b - startAt) / Math.max(0.2, span), 0, 1);
   const smoothP = quinticSmoothstep(rawP);
-  return closedPitch + (openPitch - closedPitch) * smoothP;
+  const reflexPetalBoost = isReflex
+    ? (0.14 + 0.04 * rank) * quinticSmoothstep(clamp((b - 0.15) / 0.85, 0, 1))
+    : 0;
+  return closedPitch + (openPitch - closedPitch) * smoothP + reflexPetalBoost;
 }
 
 export function evaluateStamenPitchAtBloom(
   closedPitch: number,
   openPitch: number,
   bloom01: number,
+  bloomStyle: BloomKinematicsStyle = 'classic-cupped',
 ): number {
   const b = clamp(bloom01, 0, 1);
-  const stamenP = clamp((b - 0.18) / 0.82, 0, 1);
+  const isReflex = bloomStyle === 'heliotropic-reflex';
+  const stamenP = clamp((b - (isReflex ? 0.08 : 0.18)) / (isReflex ? 0.92 : 0.82), 0, 1);
   const smoothP = quinticSmoothstep(stamenP);
-  return closedPitch + (openPitch - closedPitch) * smoothP;
+  const reflexBoost = isReflex ? openPitch * 0.28 * smoothP : 0;
+  return closedPitch + (openPitch - closedPitch) * smoothP + reflexBoost;
 }
 
 export interface OrganBudToBloomPose {
@@ -1965,9 +1984,12 @@ export function evaluateOrganBudToBloomPose(options: {
   baseYaw: number;
   baseRoll: number;
   kineticDamping01?: number;
+  bloomStyle?: BloomKinematicsStyle;
 }): OrganBudToBloomPose {
   const b = clamp(options.bloom01, 0, 1);
   const damp = clamp(options.kineticDamping01 ?? 1.0, 0.2, 1.0);
+  const style: BloomKinematicsStyle = options.bloomStyle ?? 'classic-cupped';
+  const isReflex = style === 'heliotropic-reflex';
   const isSepal = options.normalizedRank < 0;
   const rank = isSepal ? 1.0 : clamp(options.normalizedRank, 0, 1);
 
@@ -1976,6 +1998,7 @@ export function evaluateOrganBudToBloomPose(options: {
     options.openPitch,
     options.normalizedRank,
     b,
+    style,
   );
 
   // Dual-harmonic physiological breathing wave propagating radially from heart (rank=0) to outer rim (rank=1)
@@ -1983,28 +2006,40 @@ export function evaluateOrganBudToBloomPose(options: {
   // as b->1, the radial phase lag expands into a lush cascading phyllotaxis breathing wave.
   const radialLag = (isSepal ? 1.65 : rank * 1.35) * (0.22 + 0.78 * b);
   const phaseJitter = options.phaseOffset * (0.12 + 0.48 * b);
-  const primaryBreath = Math.sin(options.elapsedSec * 1.48 - radialLag + phaseJitter);
+  const breathFreq = isReflex ? 1.72 : 1.48;
+  const primaryBreath = Math.sin(
+    options.elapsedSec * breathFreq - radialLag + phaseJitter,
+  );
   const secondaryBreath =
-    Math.cos(options.elapsedSec * 2.96 - radialLag * 1.3 + phaseJitter * 1.4) * 0.34;
-  const breathPulse = clamp((primaryBreath + secondaryBreath) / 1.34, -1, 1) * damp;
+    Math.cos(
+      options.elapsedSec * (breathFreq * 2.0) -
+        radialLag * 1.3 +
+        phaseJitter * 1.4,
+    ) * 0.34;
+  const breathPulse =
+    clamp((primaryBreath + secondaryBreath) / 1.34, -1, 1) * damp;
 
-  // Pitch breathing: gentle sleeping-bud respiration (0.012 rad) at b=0, expanding to 0.042 rad at b=1
+  // Pitch breathing: gentle sleeping-bud respiration (0.012 rad) at b=0, expanding to 0.042..0.052 rad at b=1
   const pitchBreathAmp = isSepal
-    ? (0.008 + 0.022 * b)
-    : (0.012 + 0.030 * b);
+    ? 0.008 + 0.022 * b
+    : 0.012 + (isReflex ? 0.038 : 0.030) * b;
   const pitchRad = Math.max(0.04, basePitch + breathPulse * pitchBreathAmp);
 
   // Roll & Yaw: strictly 0 roll/yaw skew at b=0 so closed bud petals stay 100% concentric!
   const bloomRollEnvelope = b * b;
   const rollWave =
-    Math.sin(options.elapsedSec * 1.55 + options.phaseOffset * 1.1 - radialLag * 0.5) *
+    Math.sin(
+      options.elapsedSec * 1.55 + options.phaseOffset * 1.1 - radialLag * 0.5,
+    ) *
     0.022 *
     bloomRollEnvelope *
     damp;
   const rollRad = options.baseRoll * bloomRollEnvelope + rollWave;
 
   // Gentle imbricate spiral twist only during mid-bloom unfurling (0 at b=0 and 0 at b=1)
-  const midBloomSpiral = isSepal ? 0 : 4 * b * (1 - b) * 0.045 * rank;
+  const midBloomSpiral = isSepal
+    ? 0
+    : 4 * b * (1 - b) * (isReflex ? 0.068 : 0.045) * rank;
   const azimuthBreath =
     Math.cos(options.elapsedSec * 1.32 + options.phaseOffset * 0.8) *
     0.012 *
@@ -2014,7 +2049,7 @@ export function evaluateOrganBudToBloomPose(options: {
 
   // Convolute width unfurling (0.62..0.78 at b=0 -> 1.0 at b>=0.68) + subtle breathing width expansion
   const widthUnfurl = quinticSmoothstep(clamp(b / 0.68, 0, 1));
-  const closedWidthRatio = isSepal ? 0.78 : 0.62 + 0.14 * rank;
+  const closedWidthRatio = isSepal ? 0.82 : 0.62 + 0.14 * rank;
   const breathWidthMod = 1.0 + breathPulse * (0.012 + 0.018 * b);
   const scaleX =
     (closedWidthRatio + (1.0 - closedWidthRatio) * widthUnfurl) *
@@ -2033,9 +2068,12 @@ export function evaluateOrganBudToBloomPose(options: {
   // Shell Z-depth compression in bud state (0.48..0.64 at b=0 -> 1.0 at b>=0.75) prevents belly intersection!
   const cupUnfurl = quinticSmoothstep(clamp(b / 0.75, 0, 1));
   const closedCupRatio = isSepal ? 0.48 : 0.52 + 0.12 * rank;
+  const reflexCupFlatten = isReflex && !isSepal ? 1.0 - 0.18 * b * b : 1.0;
   const breathCupMod = 1.0 + breathPulse * (0.022 + 0.032 * b);
   const scaleZ =
-    (closedCupRatio + (1.0 - closedCupRatio) * cupUnfurl) * breathCupMod;
+    (closedCupRatio + (1.0 - closedCupRatio) * cupUnfurl) *
+    reflexCupFlatten *
+    breathCupMod;
 
   return {
     pitchRad,

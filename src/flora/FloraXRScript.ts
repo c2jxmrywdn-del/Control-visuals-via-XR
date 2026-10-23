@@ -10,6 +10,7 @@ import {
   type HandPoseClassification,
   type InteractionLogicMode,
   type GaussianSplatMode,
+  type BloomKinematicsStyle,
 } from './gestureMath';
 import {ProceduralFlowerModel, createFlowerById} from './FlowerModels';
 import {EnvironmentManager} from './EnvironmentManager';
@@ -30,6 +31,7 @@ declare global {
       simulatePinchDrag: (dx: number, dy: number, dz?: number) => void;
       triggerPresetPose: (pose: HandPoseLabel, aperture01?: number) => HandPoseClassification;
       setGaussianSplatMode: (mode: GaussianSplatMode) => void;
+      setBloomStyle?: (style: BloomKinematicsStyle) => void;
       setOperatingHold?: (enabled: boolean) => void;
       startVideoDemo: () => Promise<void>;
     };
@@ -56,6 +58,7 @@ export class FloraXRScript extends xb.Script {
   private activeSpeciesIndex = 0;
   private activeEnvIndex = 0;
   private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
+  private bloomStyle: BloomKinematicsStyle = 'classic-cupped';
 
   private readonly bloomSpring = new SpringDamper(78, 88, 19);
   private readonly transitionScaleSpring = new SpringDamper(1.0, 145, 19);
@@ -157,6 +160,9 @@ export class FloraXRScript extends xb.Script {
       },
       onChangeGaussianSplatMode: (mode) => {
         this.setGaussianSplatMode(mode);
+      },
+      onChangeBloomStyle: (style) => {
+        this.setBloomStyle(style);
       },
       onGetPresetSnapshot: () => ({
         speciesId: FLOWER_LIBRARY[this.activeSpeciesIndex].id,
@@ -465,6 +471,7 @@ export class FloraXRScript extends xb.Script {
         fingerExtensions: classification?.fingerExtensions ?? [0, 0, 0, 0, 0],
         isPinchGrabbing: Boolean(classification?.isPinchGrabbing),
         unifiedPlantRotation: true,
+        bloomStyle: this.bloomStyle,
         gaussianSplatMode: this.gaussianSplatMode,
         gaussianSplatCount: this.activeFlowerModel?.getGaussianSplatCount() ?? 0,
         firebaseReady: true,
@@ -566,6 +573,10 @@ export class FloraXRScript extends xb.Script {
         this.setGaussianSplatMode(mode);
         this.handOverlay.setGaussianSplatModeUI(mode, false);
       },
+      setBloomStyle: (style: BloomKinematicsStyle) => {
+        this.setBloomStyle(style);
+        this.handOverlay.setBloomStyleUI(style, false);
+      },
       setOperatingHold: (enabled: boolean) => {
         this.handOverlay.setOperatingHold(enabled);
       },
@@ -580,6 +591,14 @@ export class FloraXRScript extends xb.Script {
     for (const model of this.flowerModels.values()) {
       model.setGaussianSplatMode(mode);
     }
+  }
+
+  setBloomStyle(style: BloomKinematicsStyle): void {
+    this.bloomStyle = style;
+    for (const model of this.flowerModels.values()) {
+      model.setBloomStyle(style);
+    }
+    this.renderSingleHeadlessFrame(450);
   }
 
   onXRSessionStarted(): void {
@@ -628,6 +647,7 @@ export class FloraXRScript extends xb.Script {
     if (!model) {
       model = createFlowerById(id);
       model.setGaussianSplatMode(this.gaussianSplatMode);
+      model.setBloomStyle(this.bloomStyle);
       model.visible = false;
       this.flowerModels.set(id, model);
       this.flowerPivotGroup.add(model);

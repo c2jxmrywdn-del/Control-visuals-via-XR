@@ -19,6 +19,7 @@ import {
   type InteractionLogicMode,
   type MLGestureHint,
   type GaussianSplatMode,
+  type BloomKinematicsStyle,
 } from './gestureMath';
 import {
   signInWithGooglePopup,
@@ -82,6 +83,7 @@ export interface HandTrackerCallbacks {
     resetAxes?: boolean,
   ) => void;
   onChangeGaussianSplatMode?: (mode: GaussianSplatMode) => void;
+  onChangeBloomStyle?: (style: BloomKinematicsStyle) => void;
   onGetPresetSnapshot?: () => {
     speciesId: string;
     environmentId: string;
@@ -141,6 +143,7 @@ export class HandTrackerOverlay {
 
   private logicMode: InteractionLogicMode = 'smart-context';
   private gaussianSplatMode: GaussianSplatMode = 'hybrid-3dgs';
+  private bloomStyle: BloomKinematicsStyle = 'classic-cupped';
   private strongDenoiseEnabled = true;
   private sensitivityPct = 55;
 
@@ -322,7 +325,13 @@ export class HandTrackerOverlay {
         <div class="flora-pose-quick-btns">
           <button type="button" class="flora-mini-btn" data-quick-bloom="0" data-testid="preset-bud-btn">含苞 0%</button>
           <button type="button" class="flora-mini-btn" data-quick-bloom="100" data-testid="preset-bloom-btn">盛放 100%</button>
-          <button type="button" class="flora-mini-btn" id="flora-inspect-stamen-btn">俯视花蕊</button>
+          <button
+            type="button"
+            class="flora-mini-btn"
+            id="flora-bloom-style-btn"
+            data-testid="bloom-style-btn"
+            title="切换两种自然绽放情境：层进杯状护蕊（伴生花苞含蓄） vs 向光盛极双花齐放（外瓣翻卷舒展、花心早露、侧枝伴生花同步盛开）"
+          >绽放: 层进杯状</button>
           <button type="button" class="flora-mini-btn flora-mini-btn-accent" id="flora-swipe-sim-btn">下一株花 →</button>
         </div>
       </aside>
@@ -690,15 +699,13 @@ export class HandTrackerOverlay {
       });
 
     document
-      .getElementById('flora-inspect-stamen-btn')
+      .getElementById('flora-bloom-style-btn')
       ?.addEventListener('click', () => {
-        this.simMode = 'interactive';
-        this.updateSimButtonsUI();
-        this.notifyFlowerInteraction(2600);
-        this.setSimulatedBloom(100);
-        this.simulatedPitchX = 1.22;
-        this.callbacks.onRotateStep(0, 1.22, 0, false);
-        this.showGestureToast('已全开展露花蕊 · X轴大倾角俯视花心结构');
+        const nextStyle: BloomKinematicsStyle =
+          this.bloomStyle === 'classic-cupped'
+            ? 'heliotropic-reflex'
+            : 'classic-cupped';
+        this.setBloomStyleUI(nextStyle, true);
       });
 
     const swipeSimBtn = document.getElementById('flora-swipe-sim-btn');
@@ -994,6 +1001,28 @@ export class HandTrackerOverlay {
 
   getGaussianSplatMode(): GaussianSplatMode {
     return this.gaussianSplatMode;
+  }
+
+  setBloomStyleUI(style: BloomKinematicsStyle, notify = true): void {
+    this.bloomStyle = style;
+    const styleBtn = document.getElementById('flora-bloom-style-btn');
+    if (styleBtn) {
+      styleBtn.textContent =
+        style === 'heliotropic-reflex' ? '绽放: 双花向光' : '绽放: 层进杯状';
+      styleBtn.classList.toggle('active', style === 'heliotropic-reflex');
+    }
+    if (notify) {
+      this.callbacks.onChangeBloomStyle?.(style);
+      this.showGestureToast(
+        style === 'heliotropic-reflex'
+          ? '已切换至「向光盛极 · 双花齐放」：花心早露、外瓣翻卷托举、侧枝伴生花同步盛开'
+          : '已切换至「层进杯状 · 护蕊伴生」：由外向内层层舒展呈深杯碗状，侧枝花苞含蓄伴生',
+      );
+    }
+  }
+
+  getBloomStyle(): BloomKinematicsStyle {
+    return this.bloomStyle;
   }
 
   setSensitivity(pct: number, showFeedback = false): void {
