@@ -489,12 +489,13 @@ export class FloraXRScript extends xb.Script {
       const steps = Math.max(1, Math.round(ms / 16.67));
       const dt = ms / 1000 / steps;
       for (let i = 0; i < steps; i++) {
+        this.headlessSimulatedSec += dt;
         const b = clamp(this.bloomSpring.step(dt), 0, 100) / 100;
         const s = this.transitionScaleSpring.step(dt);
         const pitchX = this.pitchSpring.step(dt);
         const yawY = this.yawSpring.step(dt);
         const rollZ = this.rollSpring.step(dt);
-        const nowSec = performance.now() / 1000;
+        const nowSec = performance.now() / 1000 + this.headlessSimulatedSec;
         const bloomVel = this.bloomSpring.velocity / 100;
         const angSpeed = Math.hypot(
           this.pitchSpring.velocity,
@@ -520,7 +521,10 @@ export class FloraXRScript extends xb.Script {
           angSpeed,
         );
       }
-      this.handOverlay.update(performance.now() / 1000, dt);
+      this.handOverlay.update(
+        performance.now() / 1000 + this.headlessSimulatedSec,
+        dt,
+      );
       if (xb.core.renderer && xb.core.scene && xb.core.camera) {
         xb.core.renderer.render(xb.core.scene, xb.core.camera);
       }
@@ -616,7 +620,7 @@ export class FloraXRScript extends xb.Script {
       );
     }
     this.syncSpatialCardText();
-    this.renderSingleHeadlessFrame(450);
+    this.renderSingleHeadlessFrame(1150);
   }
 
   private getOrCreateFlowerModel(id: string): ProceduralFlowerModel {
@@ -636,7 +640,7 @@ export class FloraXRScript extends xb.Script {
       ((index % FLOWER_LIBRARY.length) + FLOWER_LIBRARY.length) %
       FLOWER_LIBRARY.length;
     if (safeIdx === this.activeSpeciesIndex && this.activeFlowerModel.visible) {
-      this.renderSingleHeadlessFrame(250);
+      this.renderSingleHeadlessFrame(450);
       return;
     }
 
@@ -666,7 +670,7 @@ export class FloraXRScript extends xb.Script {
     this.environmentManager.triggerGestureBurst(nextSpec.primaryColor);
     this.handOverlay.updateActiveSpeciesUI(safeIdx);
     this.syncSpatialCardText();
-    this.renderSingleHeadlessFrame(550);
+    this.renderSingleHeadlessFrame(1150);
   }
 
   selectEnvironment(index: number): void {
@@ -679,7 +683,7 @@ export class FloraXRScript extends xb.Script {
     this.environmentManager.setEnvironment(env);
     this.handOverlay.updateActiveEnvironmentUI(safeIdx);
     this.syncSpatialCardText();
-    this.renderSingleHeadlessFrame(450);
+    this.renderSingleHeadlessFrame(650);
   }
 
   private syncSpatialCardText(): void {
@@ -698,6 +702,7 @@ export class FloraXRScript extends xb.Script {
 
   private headlessFramesRendered = 0;
   private headlessResizeBound = false;
+  private headlessSimulatedSec = 0;
 
   private renderSingleHeadlessFrame(advanceMs = 200): void {
     const isHeadless =

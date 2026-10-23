@@ -16,6 +16,7 @@ import {
   ENVIRONMENT_LIBRARY,
   computeFloralShellEnvelope,
   evaluateOrganPitchAtBloom,
+  evaluateOrganBudToBloomPose,
   evaluateStamenPitchAtBloom,
   evaluateSphericalHarmonicsRadiance,
   compute2DGaussianSplatCovariance,
@@ -584,6 +585,99 @@ test('evaluateDetailedBloomKinematics models 5 progressive botanical anthesis st
   assert.equal(s0.antherDehiscenceGlow, 0);
   assert.ok(s4.antherDehiscenceGlow > 0.85);
 });
+
+test('evaluateOrganBudToBloomPose enforces non-intersecting closed-bud geometry (bloom 0%) and continuous physiological breathing', () => {
+  const closedInner = evaluateOrganBudToBloomPose({
+    closedPitch: 0.16,
+    openPitch: 0.68,
+    normalizedRank: 0.0,
+    bloom01: 0.0,
+    elapsedSec: 0.0,
+    phaseOffset: 0.5,
+    naturalScaleX: 1.0,
+    naturalScaleY: 1.0,
+    baseYaw: -1.2,
+    baseRoll: 0.08,
+  });
+  const closedOuter = evaluateOrganBudToBloomPose({
+    closedPitch: 0.42,
+    openPitch: 1.45,
+    normalizedRank: 1.0,
+    bloom01: 0.0,
+    elapsedSec: 0.0,
+    phaseOffset: 1.2,
+    naturalScaleX: 1.0,
+    naturalScaleY: 1.0,
+    baseYaw: -2.4,
+    baseRoll: -0.07,
+  });
+  const closedSepal = evaluateOrganBudToBloomPose({
+    closedPitch: 0.58,
+    openPitch: 1.67,
+    normalizedRank: -1.0,
+    bloom01: 0.0,
+    elapsedSec: 0.0,
+    phaseOffset: 0.8,
+    naturalScaleX: 1.0,
+    naturalScaleY: 1.0,
+    baseYaw: -0.5,
+    baseRoll: 0.06,
+  });
+
+  // At bloom=0%, lateral roll and yaw skew must be strictly 0 so concentric shells never cross
+  assert.equal(closedInner.rollRad, 0);
+  assert.equal(closedOuter.rollRad, 0);
+  assert.equal(closedSepal.rollRad, 0);
+  assert.equal(closedInner.yawRad, -1.2);
+  assert.equal(closedOuter.yawRad, -2.4);
+  assert.equal(closedSepal.yawRad, -0.5);
+
+  // Strict radial pitch stratification in closed bud: inner < outer < calyx sepal
+  assert.ok(
+    closedInner.pitchRad < closedOuter.pitchRad &&
+      closedOuter.pitchRad < closedSepal.pitchRad,
+    `Expected closed bud pitch inner (${closedInner.pitchRad}) < outer (${closedOuter.pitchRad}) < sepal (${closedSepal.pitchRad})`,
+  );
+
+  // Convolute width narrowing and shell Z-depth compression in closed bud
+  assert.ok(closedInner.scaleX < 0.7 && closedInner.scaleZ < 0.6);
+  assert.ok(closedSepal.scaleZ < 0.55);
+
+  // Verify breathing oscillation across time at full bloom
+  const breathT0 = evaluateOrganBudToBloomPose({
+    closedPitch: 0.3,
+    openPitch: 1.2,
+    normalizedRank: 0.6,
+    bloom01: 1.0,
+    elapsedSec: 0.2,
+    phaseOffset: 0.0,
+    naturalScaleX: 1.0,
+    naturalScaleY: 1.0,
+    baseYaw: 0,
+    baseRoll: 0.05,
+  });
+  const breathT1 = evaluateOrganBudToBloomPose({
+    closedPitch: 0.3,
+    openPitch: 1.2,
+    normalizedRank: 0.6,
+    bloom01: 1.0,
+    elapsedSec: 2.3,
+    phaseOffset: 0.0,
+    naturalScaleX: 1.0,
+    naturalScaleY: 1.0,
+    baseYaw: 0,
+    baseRoll: 0.05,
+  });
+  assert.ok(
+    Math.abs(breathT0.pitchRad - breathT1.pitchRad) > 0.02,
+    'Botanical breathing must visibly modulate petal pitch over time',
+  );
+  assert.ok(
+    breathT0.scaleX > closedInner.scaleX && breathT0.scaleZ > closedInner.scaleZ,
+    'Full bloom petal width and 3D spoon depth must expand from closed bud state',
+  );
+});
+
 
 
 

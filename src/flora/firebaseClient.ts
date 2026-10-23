@@ -1,14 +1,19 @@
 import {initializeApp} from 'firebase/app';
 import {
+  initializeAuth,
   getAuth,
+  inMemoryPersistence,
+  browserPopupRedirectResolver,
   GoogleAuthProvider,
   signInWithPopup,
   signOut as firebaseSignOut,
   onAuthStateChanged,
+  type Auth,
   type User,
 } from 'firebase/auth';
 import {
   getFirestore,
+  setLogLevel,
   doc,
   collection,
   getDoc,
@@ -25,9 +30,58 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import {clamp, type GaussianSplatMode} from './gestureMath';
 
+/**
+ * Purges any stale/expired Firebase Auth session persisted in IndexedDB or Web Storage
+ * from earlier browser sessions so an expired refresh token never blocks Firestore boot
+ * when `securetoken.googleapis.com` is disabled on the project.
+ */
+function purgeStalePersistedFirebaseAuth(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      if (!storage) continue;
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (
+          key &&
+          (key.startsWith('firebase:authUser:') ||
+            key.startsWith('firebase:host:') ||
+            key.startsWith('firebase:previous_websocket_failure'))
+        ) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((k) => storage.removeItem(k));
+    }
+  } catch {
+    // Ignore storage access errors in sandboxed iframes
+  }
+  try {
+    window.indexedDB?.deleteDatabase('firebaseLocalStorageDb');
+  } catch {
+    // Ignore IndexedDB deletion errors
+  }
+}
+
+purgeStalePersistedFirebaseAuth();
+
 const app = initializeApp(firebaseConfig);
+setLogLevel('silent');
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
+
+function createInMemoryAuth(): Auth {
+  try {
+    return initializeAuth(app, {
+      persistence: inMemoryPersistence,
+      popupRedirectResolver: browserPopupRedirectResolver,
+    });
+  } catch {
+    return getAuth(app);
+  }
+}
+
+export const auth = createInMemoryAuth();
 const googleProvider = new GoogleAuthProvider();
 
 export enum OperationType {
@@ -133,6 +187,27 @@ export function sanitizeText(raw: string, maxLen: number, fallback: string): str
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+/**
+ * Verifies that the authenticated user has a usable ID token without triggering
+ * an unrecoverable `securetoken.googleapis.com` error. If the token cannot be
+ * retrieved or refreshed, signs out immediately so Firestore remains healthy.
+ */
+async function ensureValidAuthUser(user: User | null): Promise<User | null> {
+  if (!user) return null;
+  try {
+    const token = await user.getIdToken(false);
+    if (!token) {
+      await firebaseSignOut(auth).catch(() => {});
+      return null;
+    }
+    return user;
+  } catch {
+    purgeStalePersistedFirebaseAuth();
+    await firebaseSignOut(auth).catch(() => {});
+    return null;
+  }
+}
+
 const profileBootstrapInFlight = new Map<string, Promise<void>>();
 
 export async function ensureUserProfileBootstrapped(
@@ -140,7 +215,10 @@ export async function ensureUserProfileBootstrapped(
   preferredSpeciesId = 'lotus',
 ): Promise<void> {
   if (!user.emailVerified) return;
-  const uid = sanitizeId(user.uid, MAX_ID_LENGTH);
+  const validUser = await ensureValidAuthUser(user);
+  if (!validUser) return;
+
+  const uid = sanitizeId(validUser.uid, MAX_ID_LENGTH);
   if (!BLUEPRINT_ID_PATTERN.test(uid)) return;
 
   const existingPromise = profileBootstrapInFlight.get(uid);
@@ -161,7 +239,7 @@ export async function ensureUserProfileBootstrapped(
       }
 
       const displayName = sanitizeText(
-        user.displayName || user.email?.split('@')[0] || 'FLORA Botanist',
+        validUser.displayName || validUser.email?.split('@')[0] || 'FLORA Botanist',
         MAX_DISPLAY_NAME_LENGTH,
         'FLORA Botanist',
       );
@@ -178,10 +256,10 @@ export async function ensureUserProfileBootstrapped(
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      if (user.email && user.email.length >= 3) {
+      if (validUser.email && validUser.email.length >= 3) {
         batch.set(privateRef, {
           uid,
-          email: user.email.slice(0, MAX_EMAIL_LENGTH),
+          email: validUser.email.slice(0, MAX_EMAIL_LENGTH),
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -203,14 +281,20 @@ export async function ensureUserProfileBootstrapped(
 }
 
 export async function signInWithGooglePopup(): Promise<User | null> {
-  const result = await signInWithPopup(auth, googleProvider);
-  if (result.user) {
-    await ensureUserProfileBootstrapped(result.user);
+  const result = await signInWithPopup(
+    auth,
+    googleProvider,
+    browserPopupRedirectResolver,
+  );
+  const validUser = await ensureValidAuthUser(result.user);
+  if (validUser) {
+    await ensureUserProfileBootstrapped(validUser);
   }
-  return result.user;
+  return validUser;
 }
 
 export async function signOutFromFlora(): Promise<void> {
+  purgeStalePersistedFirebaseAuth();
   await firebaseSignOut(auth);
 }
 
@@ -218,12 +302,20 @@ export function subscribeToAuthChanges(
   callback: (user: User | null) => void,
 ): Unsubscribe {
   return onAuthStateChanged(auth, (user) => {
-    if (user) {
-      void ensureUserProfileBootstrapped(user).catch((err) => {
+    if (!user) {
+      callback(null);
+      return;
+    }
+    void ensureValidAuthUser(user).then((validUser) => {
+      if (!validUser) {
+        callback(null);
+        return;
+      }
+      void ensureUserProfileBootstrapped(validUser).catch((err) => {
         console.warn('Profile bootstrap warning:', err);
       });
-    }
-    callback(user);
+      callback(validUser);
+    });
   });
 }
 

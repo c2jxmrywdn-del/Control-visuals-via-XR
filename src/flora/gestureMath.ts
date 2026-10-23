@@ -1796,6 +1796,10 @@ export function computeFloralShellEnvelope(
   const isLotus = morph === 'lotus-pod';
   const isSunflower = morph === 'sunflower-capitulum';
   const isLily = morph === 'lily-recurved';
+  const isMonocot =
+    morph === 'iris-bearded' ||
+    morph === 'lily-recurved' ||
+    morph === 'orchid-zygomorphic';
 
   const coreMaxRadius = isSunflower ? 0.114 : isLotus ? 0.044 : 0.015;
   const stamenMinRadius = isSunflower
@@ -1817,12 +1821,14 @@ export function computeFloralShellEnvelope(
     ? 0.118
     : isLotus
       ? 0.062
-      : 0.034;
+      : 0.032;
   const petalMaxRadius = isSunflower
     ? 0.138
     : isLotus
       ? 0.092
-      : 0.074;
+      : isMonocot
+        ? 0.052
+        : 0.072;
 
   const stamenClosedPitchRange: [number, number] = isLily
     ? [0.04, 0.09]
@@ -1831,18 +1837,19 @@ export function computeFloralShellEnvelope(
     ? [0.28, 0.4]
     : [0.24, 0.48];
 
-  // Tight closed-bud pitch range so at b=0 all petals cup closely into an authentic imbricate flower bud
+  // Strictly stratified closed-bud pitch range so at b=0 all petals nest in concentric shells without crossing
   const petalClosedPitchRange: [number, number] = isSunflower
-    ? [0.18, 0.36]
-    : [0.15, 0.38];
+    ? [0.2, 0.38]
+    : [0.16, 0.42];
   const petalOpenPitchRange: [number, number] = isSunflower
     ? [spec.maxOpenAngleRad * 0.9, spec.maxOpenAngleRad * 1.05]
     : [0.68, spec.maxOpenAngleRad];
 
-  const sepalRadius = petalMaxRadius + 0.009;
+  // Generous radial (+15mm) and angular (+0.16 rad) clearance so calyx sepals clasp outside outer petals with zero clipping
+  const sepalRadius = petalMaxRadius + 0.015;
   const sepalY = 0.004;
-  const sepalClosedPitch = petalClosedPitchRange[1] + 0.1;
-  const sepalOpenPitch = petalOpenPitchRange[1] + 0.2;
+  const sepalClosedPitch = petalClosedPitchRange[1] + 0.16;
+  const sepalOpenPitch = petalOpenPitchRange[1] + 0.22;
 
   const maxCorollaReachRadius = petalMaxRadius + spec.petalLength * 1.05;
   const companionBudPosition: [number, number, number] = [
@@ -1872,13 +1879,19 @@ export function computeFloralShellEnvelope(
   };
 }
 
+function quinticSmoothstep(t: number): number {
+  const c = clamp(t, 0, 1);
+  return c * c * c * (c * (c * 6 - 15) + 10);
+}
+
 /**
- * Evaluates a strictly monotonic, multi-stage botanical opening pitch angle for a petal or sepal
- * at normalizedRank and bloom01 in [0, 1].
- * - Calyx sepals (normalizedRank < 0) unclasping first during early bud stage [0..0.32]
- * - Outer guard petals (normalizedRank -> 1) peel open from b = 0
- * - Inner heart petals (normalizedRank -> 0) stay cupped in early bud stage and unfurl smoothly up to b = 1
- * Strictly preserves innerPitch < midPitch < outerPitch < sepalPitch at every b in [0, 1]!
+ * Evaluates a strictly monotonic, C2-continuous Quintic Sigmoidal opening pitch angle
+ * for a petal (`normalizedRank in [0, 1]`) or calyx sepal (`normalizedRank < 0`) at `bloom01 in [0, 1]`.
+ * - Calyx sepals (`normalizedRank < 0`) unclasp first during early bud stage `[0..0.32]` so the green calyx
+ *   clears the path before the outer petals descend.
+ * - Outer guard petals (`normalizedRank -> 1`) peel open smoothly from `b = 0`.
+ * - Inner heart petals (`normalizedRank -> 0`) stay cupped in the early bud stage and unfurl up to `b = 1`.
+ * Strictly preserves `innerPitch < midPitch < outerPitch < sepalPitch` at every `b in [0, 1]`.
  */
 export function evaluateOrganPitchAtBloom(
   closedPitch: number,
@@ -1888,17 +1901,20 @@ export function evaluateOrganPitchAtBloom(
 ): number {
   const b = clamp(bloom01, 0, 1);
   if (normalizedRank < 0) {
-    const sepalP = clamp(b / 0.34, 0, 1);
-    const smoothS = sepalP * sepalP * (3 - 2 * sepalP);
+    const isOuterCalyx = normalizedRank <= -0.8;
+    const sepalStart = isOuterCalyx ? 0.0 : 0.02;
+    const sepalSpan = isOuterCalyx ? 0.28 : 0.32;
+    const sepalP = clamp((b - sepalStart) / sepalSpan, 0, 1);
+    const smoothS = quinticSmoothstep(sepalP);
     return closedPitch + (openPitch - closedPitch) * smoothS;
   }
 
   const rank = clamp(normalizedRank, 0, 1);
-  // Outer petals (rank=1) start opening immediately at b=0; inner heart petals (rank=0) start at b=0.18
-  const startAt = (1 - rank) * 0.18;
+  // Outer petals (rank=1) start opening immediately at b=0; inner heart petals (rank=0) start at b=0.22
+  const startAt = (1 - rank) * 0.22;
   const span = 1 - startAt;
   const rawP = clamp((b - startAt) / Math.max(0.2, span), 0, 1);
-  const smoothP = rawP * rawP * (3 - 2 * rawP);
+  const smoothP = quinticSmoothstep(rawP);
   return closedPitch + (openPitch - closedPitch) * smoothP;
 }
 
@@ -1909,8 +1925,127 @@ export function evaluateStamenPitchAtBloom(
 ): number {
   const b = clamp(bloom01, 0, 1);
   const stamenP = clamp((b - 0.18) / 0.82, 0, 1);
-  const smoothP = stamenP * stamenP * (3 - 2 * stamenP);
+  const smoothP = quinticSmoothstep(stamenP);
   return closedPitch + (openPitch - closedPitch) * smoothP;
+}
+
+export interface OrganBudToBloomPose {
+  pitchRad: number;
+  rollRad: number;
+  yawRad: number;
+  scaleX: number;
+  scaleY: number;
+  scaleZ: number;
+  breathPulse: number;
+}
+
+/**
+ * Computes the complete non-intersecting bud-to-bloom interpolation & living botanical breathing
+ * transform for a single petal or calyx sepal (`normalizedRank < 0` for sepals, `[0, 1]` for petals).
+ *
+ * Key Guarantees at `bloom01 = 0` (Tight Bud State):
+ *   1. Convolute lateral width narrowing (`scaleX = 0.62..0.78`) prevents adjacent petals on the same
+ *      or neighboring whorls from slicing through each other laterally.
+ *   2. Radial shell thickness compression (`scaleZ = 0.48..0.64`) slims the 3D spoon belly in the closed
+ *      bud so inner whorls never bulge into outer whorls and outer petals never pierce the calyx sepals.
+ *   3. Zero lateral roll (`rollRad = 0`) and zero tangential yaw skew (`yawRad = baseYaw`) at `b = 0`
+ *      keep every petal and sepal strictly aligned with its concentric radial shell.
+ *   4. Continuous physiological breathing (`breathPulse`) animates a gentle inhale-exhale wave across
+ *      both the sleeping bud (`b = 0`) and full blossom (`b = 1`).
+ */
+export function evaluateOrganBudToBloomPose(options: {
+  closedPitch: number;
+  openPitch: number;
+  normalizedRank: number;
+  bloom01: number;
+  elapsedSec: number;
+  phaseOffset: number;
+  naturalScaleX: number;
+  naturalScaleY: number;
+  baseYaw: number;
+  baseRoll: number;
+  kineticDamping01?: number;
+}): OrganBudToBloomPose {
+  const b = clamp(options.bloom01, 0, 1);
+  const damp = clamp(options.kineticDamping01 ?? 1.0, 0.2, 1.0);
+  const isSepal = options.normalizedRank < 0;
+  const rank = isSepal ? 1.0 : clamp(options.normalizedRank, 0, 1);
+
+  const basePitch = evaluateOrganPitchAtBloom(
+    options.closedPitch,
+    options.openPitch,
+    options.normalizedRank,
+    b,
+  );
+
+  // Dual-harmonic physiological breathing wave propagating radially from heart (rank=0) to outer rim (rank=1)
+  // At b=0, radial phase lag is small so concentric bud shells breathe in unison without colliding;
+  // as b->1, the radial phase lag expands into a lush cascading phyllotaxis breathing wave.
+  const radialLag = (isSepal ? 1.65 : rank * 1.35) * (0.22 + 0.78 * b);
+  const phaseJitter = options.phaseOffset * (0.12 + 0.48 * b);
+  const primaryBreath = Math.sin(options.elapsedSec * 1.48 - radialLag + phaseJitter);
+  const secondaryBreath =
+    Math.cos(options.elapsedSec * 2.96 - radialLag * 1.3 + phaseJitter * 1.4) * 0.34;
+  const breathPulse = clamp((primaryBreath + secondaryBreath) / 1.34, -1, 1) * damp;
+
+  // Pitch breathing: gentle sleeping-bud respiration (0.012 rad) at b=0, expanding to 0.042 rad at b=1
+  const pitchBreathAmp = isSepal
+    ? (0.008 + 0.022 * b)
+    : (0.012 + 0.030 * b);
+  const pitchRad = Math.max(0.04, basePitch + breathPulse * pitchBreathAmp);
+
+  // Roll & Yaw: strictly 0 roll/yaw skew at b=0 so closed bud petals stay 100% concentric!
+  const bloomRollEnvelope = b * b;
+  const rollWave =
+    Math.sin(options.elapsedSec * 1.55 + options.phaseOffset * 1.1 - radialLag * 0.5) *
+    0.022 *
+    bloomRollEnvelope *
+    damp;
+  const rollRad = options.baseRoll * bloomRollEnvelope + rollWave;
+
+  // Gentle imbricate spiral twist only during mid-bloom unfurling (0 at b=0 and 0 at b=1)
+  const midBloomSpiral = isSepal ? 0 : 4 * b * (1 - b) * 0.045 * rank;
+  const azimuthBreath =
+    Math.cos(options.elapsedSec * 1.32 + options.phaseOffset * 0.8) *
+    0.012 *
+    bloomRollEnvelope *
+    damp;
+  const yawRad = options.baseYaw + midBloomSpiral + azimuthBreath;
+
+  // Convolute width unfurling (0.62..0.78 at b=0 -> 1.0 at b>=0.68) + subtle breathing width expansion
+  const widthUnfurl = quinticSmoothstep(clamp(b / 0.68, 0, 1));
+  const closedWidthRatio = isSepal ? 0.78 : 0.62 + 0.14 * rank;
+  const breathWidthMod = 1.0 + breathPulse * (0.012 + 0.018 * b);
+  const scaleX =
+    (closedWidthRatio + (1.0 - closedWidthRatio) * widthUnfurl) *
+    options.naturalScaleX *
+    breathWidthMod;
+
+  // Length elongation + breathing stretch
+  const lengthUnfurl = quinticSmoothstep(clamp(b / 0.75, 0, 1));
+  const closedLengthRatio = isSepal ? 0.92 : 0.90 + 0.04 * rank;
+  const breathLengthMod = 1.0 + breathPulse * (0.008 + 0.012 * b);
+  const scaleY =
+    (closedLengthRatio + (1.0 - closedLengthRatio) * lengthUnfurl) *
+    options.naturalScaleY *
+    breathLengthMod;
+
+  // Shell Z-depth compression in bud state (0.48..0.64 at b=0 -> 1.0 at b>=0.75) prevents belly intersection!
+  const cupUnfurl = quinticSmoothstep(clamp(b / 0.75, 0, 1));
+  const closedCupRatio = isSepal ? 0.48 : 0.52 + 0.12 * rank;
+  const breathCupMod = 1.0 + breathPulse * (0.022 + 0.032 * b);
+  const scaleZ =
+    (closedCupRatio + (1.0 - closedCupRatio) * cupUnfurl) * breathCupMod;
+
+  return {
+    pitchRad,
+    rollRad,
+    yawRad,
+    scaleX,
+    scaleY,
+    scaleZ,
+    breathPulse,
+  };
 }
 
 /**

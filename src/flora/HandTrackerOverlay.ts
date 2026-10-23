@@ -256,6 +256,7 @@ export class HandTrackerOverlay {
               type="button"
               class="flora-env-btn ${idx === 0 ? 'active' : ''}"
               data-env-index="${idx}"
+              data-testid="env-chip-${env.id}"
               title="${env.subtitleZh}"
             >
               <span class="flora-env-dot" style="background:${env.accentCss}"></span>
@@ -319,8 +320,8 @@ export class HandTrackerOverlay {
         />
 
         <div class="flora-pose-quick-btns">
-          <button type="button" class="flora-mini-btn" data-quick-bloom="0">含苞 0%</button>
-          <button type="button" class="flora-mini-btn" data-quick-bloom="100">盛放 100%</button>
+          <button type="button" class="flora-mini-btn" data-quick-bloom="0" data-testid="preset-bud-btn">含苞 0%</button>
+          <button type="button" class="flora-mini-btn" data-quick-bloom="100" data-testid="preset-bloom-btn">盛放 100%</button>
           <button type="button" class="flora-mini-btn" id="flora-inspect-stamen-btn">俯视花蕊</button>
           <button type="button" class="flora-mini-btn flora-mini-btn-accent" id="flora-swipe-sim-btn">下一株花 →</button>
         </div>
@@ -349,6 +350,7 @@ export class HandTrackerOverlay {
                 type="button"
                 class="flora-species-card ${idx === 0 ? 'active' : ''}"
                 data-species-index="${idx}"
+                data-testid="flower-chip-${f.id}"
                 title="${f.classZh} — ${f.nameZh}"
               >
                 <span class="flora-species-swatch" style="background: linear-gradient(135deg, ${f.primaryColor}, ${f.secondaryColor})"></span>
@@ -1073,6 +1075,10 @@ export class HandTrackerOverlay {
   setSimulatedBloom(percentage: number): void {
     this.customPoseLandmarks = null;
     const clampedPct = clamp(percentage, 0, 100);
+    if (clampedPct <= 8 && this.simulatedPinchGrabActive) {
+      this.simulatedPinchGrabActive = false;
+      this.pinchModeInlineBtn?.classList.remove('active');
+    }
     this.simulatedPinchSpread = clampedPct / 100;
     this.bloomSliderEl.value = String(clampedPct);
     const landmarks = this.buildSimulatedHandLandmarks(

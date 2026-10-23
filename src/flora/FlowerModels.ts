@@ -8,6 +8,7 @@ import {
   clamp,
   computeFloralShellEnvelope,
   evaluateOrganPitchAtBloom,
+  evaluateOrganBudToBloomPose,
   evaluateStamenPitchAtBloom,
   computeBloomForceFieldDamping,
   stepForceFieldDampedParticle,
@@ -340,28 +341,43 @@ function applyUE5FoliageSubsurfaceShader(
       uniform float uWindAmp;`,
     );
 
-    // Living GPU vertex undulation + Multi-stage petal tip uncurling & marginal ruffle awakening:
+    // Living GPU vertex undulation + Closed-Bud Convolute Vertex Distribution + Botanical Breathing:
     // Flexes petal blade & ruffled margins while keeping base (color.b == 0) 100% locked in receptacle socket!
     shader.vertexShader = shader.vertexShader.replace(
       '#include <begin_vertex>',
       `#include <begin_vertex>
       #if defined( USE_COLOR )
         float vTipDist = clamp( color.b, 0.0, 1.0 );
-        float flexWeight = vTipDist * vTipDist * ( 0.38 + 0.62 * uBloom ) * uKineticContainment;
+        float budClosure = 1.0 - smoothstep( 0.0, 0.58, uBloom );
+
+        // 1. Closed-bud vertex distribution (bloom = 0%):
+        //    Convolute lateral furling narrows upper petal margins in the bud so adjacent petals never slice through each other,
+        //    while a gentle, bounded apical cup (+z <= 0.010m) converges tips into a neat ovoid bud crown without crossing the center.
+        float budLateralFurl = mix( 1.0, 0.78 + 0.14 * ( 1.0 - vTipDist ), budClosure );
+        transformed.x *= budLateralFurl;
+        float budApexCupZ = smoothstep( 0.46, 1.0, vTipDist ) * budClosure * 0.010;
+
+        // 2. Living Botanical Breathing (花朵生理呼吸感动画):
+        //    Dual-harmonic respiration wave propagating from flower heart to petal tips
         float worldPhase = position.x * 22.0 + position.y * 14.0 + position.z * 18.0;
+        float breathCycle = sin( uTime * 1.48 - vTipDist * 2.1 + worldPhase * 0.16 ) * 0.68
+                          + cos( uTime * 0.74 + vTipDist * 1.2 ) * 0.32;
+        float bellyProfile = sin( vTipDist * 3.14159265 );
+        float vertexBreathZ = breathCycle * ( 0.0022 + 0.0038 * uBloom ) * bellyProfile * uKineticContainment;
+        float vertexBreathX = position.x * breathCycle * ( 0.016 + 0.024 * uBloom ) * bellyProfile * uKineticContainment;
+
+        // 3. Travelling breeze undulation & progressive tip uncurl / marginal ruffle awakening
+        float flexWeight = vTipDist * vTipDist * ( 0.38 + 0.62 * uBloom ) * uKineticContainment;
         float primaryWave = sin( uTime * 2.25 + worldPhase + vTipDist * 4.2 );
         float secondaryRipple = cos( uTime * 3.6 - position.x * 32.0 + vTipDist * 6.8 ) * 0.48;
         float marginWeight = clamp( abs( position.x ) * 11.0, 0.3, 1.0 );
 
-        // Progressive tip uncurl as bloom increases:
-        // At b=0 (closed bud), tips stay naturally cupped; as b->1 (full bloom), tips gently unroll outward (-z)
         float tipZone = smoothstep( 0.48, 1.0, vTipDist );
-        float uncurlArchZ = -tipZone * tipZone * uTipUncurl * 0.014;
-        // Progressive marginal ruffle awakening as petals spread open
+        float uncurlArchZ = -tipZone * tipZone * uTipUncurl * 0.014 + budApexCupZ;
         float marginalAwakeningZ = sin( position.x * 42.0 + vTipDist * 5.5 ) * ( 0.0024 * uBloom ) * marginWeight * tipZone;
 
-        transformed.z += ( primaryWave + secondaryRipple ) * uWindAmp * flexWeight * marginWeight + uncurlArchZ + marginalAwakeningZ;
-        transformed.x += sin( uTime * 1.85 + worldPhase * 0.75 ) * ( uWindAmp * 0.36 ) * flexWeight;
+        transformed.z += ( primaryWave + secondaryRipple ) * uWindAmp * flexWeight * marginWeight + uncurlArchZ + marginalAwakeningZ + vertexBreathZ;
+        transformed.x += sin( uTime * 1.85 + worldPhase * 0.75 ) * ( uWindAmp * 0.36 ) * flexWeight + vertexBreathX;
       #endif`,
     );
 
@@ -994,20 +1010,20 @@ function createSculptedPetalGeometry(
     const u = rawX * 2; // -1 .. +1
     const v = rawY + 0.5; // 0 .. 1 (0 at base claw, 1 at petal tip)
 
-    // Plump, full obovate/spoon petal silhouette (eliminates pointy triangular stiffness)
+    // Plump, full obovate/spoon petal silhouette with slender basal claw (prevents basal overlap in bud state!)
     const peakV = clamp(widthTipBias, 0.46, 0.76);
     let widthProfile: number;
     if (v <= peakV) {
       const t = v / peakV;
       widthProfile =
-        0.16 + 0.84 * Math.sin(Math.pow(t, 0.68) * (Math.PI * 0.5));
+        0.10 + 0.90 * Math.sin(Math.pow(t, 0.82) * (Math.PI * 0.5));
     } else {
       const t = clamp((v - peakV) / Math.max(0.05, 1 - peakV), 0, 1);
       const acuteArch = Math.cos(t * (Math.PI * 0.5));
       const obovateDome = Math.sqrt(Math.max(0, 1 - Math.pow(t, 2.5)));
       widthProfile =
-        0.06 +
-        0.94 * (acuteArch * (1 - tipRoundness) + obovateDome * tipRoundness);
+        0.05 +
+        0.95 * (acuteArch * (1 - tipRoundness) + obovateDome * tipRoundness);
     }
 
     const frillEdge =
@@ -1015,8 +1031,8 @@ function createSculptedPetalGeometry(
         ? 1 +
           (Math.cos(u * Math.PI * 3.2 + asymPhase) * 0.65 +
             Math.sin(u * Math.PI * 5.6 - asymPhase * 0.7) * 0.35) *
-            Math.max(tipNotchDepth * 0.15, safeRuffle * 5.2) *
-            Math.pow(v, 1.65)
+            Math.max(tipNotchDepth * 0.12, safeRuffle * 4.2) *
+            Math.pow(v, 1.75)
         : 1;
 
     const serration =
@@ -1026,7 +1042,7 @@ function createSculptedPetalGeometry(
           Math.pow(Math.abs(u), 2)
         : 0;
 
-    const organicCurveX = Math.sin(v * Math.PI * 0.85) * v * lateralSweep;
+    const organicCurveX = Math.sin(v * Math.PI * 0.85) * v * lateralSweep * 0.65;
 
     const x =
       u * (width * 0.5) * widthProfile * frillEdge +
@@ -1035,7 +1051,7 @@ function createSculptedPetalGeometry(
 
     const edgeArcDrop =
       tipRoundness > 0.42
-        ? Math.pow(Math.abs(u), 2.2) * length * 0.072 * Math.pow(v, 1.9)
+        ? Math.pow(Math.abs(u), 2.2) * length * 0.068 * Math.pow(v, 1.9)
         : 0;
     const smoothCleft = (1 - Math.cos(u * Math.PI * 2.5)) * 0.5;
     const tipNotch =
@@ -1047,41 +1063,39 @@ function createSculptedPetalGeometry(
         : 0;
     const y = v * length - tipNotch - edgeArcDrop;
 
-    // TRUE 3D SPOON / CHALICE CURVATURE:
-    // 1. Deep transverse boat cupping so left & right petal margins curve forward (+z) around the flower heart
+    // CONCENTRIC-SAFE 3D SPOON / CHALICE CURVATURE:
+    // Balanced transverse cupping (+z) and longitudinal arch (-z) so petals nest into a smooth,
+    // non-intersecting closed bud at bloom = 0% and unfurl into a volumetric 3D chalice at bloom = 100%.
     const transverseSpoon =
-      (u * u * 0.75 + Math.pow(Math.abs(u), 3.0) * 0.25) *
+      (u * u * 0.78 + Math.pow(Math.abs(u), 3.0) * 0.22) *
       width *
-      (0.24 + safeCup * 0.95) *
-      Math.sin(Math.pow(v, 0.72) * Math.PI);
+      (0.16 + safeCup * 0.62) *
+      Math.sin(Math.pow(v, 0.76) * Math.PI);
 
-    // 2. Plump longitudinal S-curve arch: bows outward (-z) in the lower/mid belly to form a round 3D bowl,
-    //    then sweeps upward (+z) or recurves (-z) at the tip depending on whorl rank
     const longitudinalBowl =
-      -Math.sin(Math.pow(v, 0.78) * Math.PI) *
+      -Math.sin(Math.pow(v, 0.82) * Math.PI) *
       length *
-      (0.11 + safeCup * 0.48);
+      (0.065 + safeCup * 0.28);
 
     const tipReflexZ =
-      -Math.pow(Math.max(0, v - 0.62) / 0.38, 1.85) *
+      -Math.pow(Math.max(0, v - 0.66) / 0.34, 1.95) *
       length *
       safeRecurve *
-      1.35;
+      0.72;
 
-    // 3. Soft curling margin lip & organic multi-harmonic wave
     const marginLipCurlZ =
       Math.pow(Math.abs(u), 2.8) *
-      Math.pow(v, 1.35) *
+      Math.pow(v, 1.45) *
       width *
-      0.055 *
+      0.036 *
       Math.cos(u * Math.PI + asymPhase * 0.5);
 
     const keelZ =
-      -Math.exp(-Math.abs(u) * 8.0) * 0.0038 * Math.sin(v * Math.PI);
+      -Math.exp(-Math.abs(u) * 8.0) * 0.0026 * Math.sin(v * Math.PI);
 
     const microVeinRelief =
       Math.cos((Math.abs(u) * 14 - v * 6.0) * Math.PI) *
-      0.00055 *
+      0.0005 *
       Math.sin(v * Math.PI) *
       (1 - Math.exp(-Math.abs(u) * 5));
 
@@ -1091,9 +1105,9 @@ function createSculptedPetalGeometry(
     const ruffleZ =
       (primaryWave + harmonicWave) *
       safeRuffle *
-      1.42 *
-      Math.pow(v, 1.55) *
-      Math.pow(Math.abs(u), 1.25);
+      1.15 *
+      Math.pow(v, 1.65) *
+      Math.pow(Math.abs(u), 1.3);
 
     const z =
       transverseSpoon +
@@ -2235,18 +2249,18 @@ export class ProceduralFlowerModel extends THREE.Group {
     const sepalCount =
       morph === 'sunflower-capitulum' ? 24 : isMonocot ? 3 : 6;
     const sepalGeo = createSculptedPetalGeometry(
-      isMonocot ? 0.064 : 0.132,
-      isMonocot ? 0.028 : 0.058,
-      0.18,
-      1.5,
-      0.0028,
+      isMonocot ? 0.072 : 0.118,
+      isMonocot ? 0.032 : 0.052,
+      0.14,
+      1.2,
+      0.0015,
       0,
-      0.5,
+      0.48,
       0.26,
-      0.2,
-      0.32,
+      0.06,
+      0.28,
       0,
-      0.5,
+      0.3,
     );
     const sepalMat = new THREE.MeshPhysicalMaterial({
       color: '#3a825e',
@@ -2273,38 +2287,40 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.materialsToDispose.push(sepalMat);
     this.meshMaterialsForMode.push(sepalMat);
 
+    // Calyx Sepals (花萼): Positioned strictly OUTSIDE `envelope.sepalRadius` (+15mm..+21mm outside petals)
+    // and split into two staggered sub-whorls (`normalizedRank = -0.5` and `-1.0`) so sepals never overlap or pierce petals!
     for (let i = 0; i < sepalCount; i++) {
-      const yaw = (i / sepalCount) * Math.PI * 2 + (i % 2) * 0.06;
-      const rad = isMonocot
-        ? 0.032
-        : envelope.sepalRadius + (i % 2) * 0.003;
+      const isOuterCalyxRing = i % 2 === 1;
+      const yawOffset = isMonocot ? Math.PI / 3 : isOuterCalyxRing ? 0.05 : 0;
+      const yaw = (i / sepalCount) * Math.PI * 2 + yawOffset;
+      const rad = envelope.sepalRadius + (isOuterCalyxRing ? 0.006 : 0.0);
       const pivot = new THREE.Group();
       pivot.position.set(
         Math.cos(yaw) * rad,
-        envelope.sepalY - (i % 2) * 0.002,
+        envelope.sepalY - (isOuterCalyxRing ? 0.003 : 0),
         Math.sin(yaw) * rad,
       );
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 2.9) * 0.05;
+      const baseRoll = organicNoise(i * 2.9) * 0.04;
       pivot.rotation.y = baseYaw;
 
       const mesh = new THREE.Mesh(sepalGeo, sepalMat);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      mesh.rotation.z = baseRoll;
+      mesh.rotation.z = 0;
       pivot.add(mesh);
       this.flowerHeadGroup.add(pivot);
 
       this.petalPivots.push({
         pivot,
         mesh,
-        normalizedRank: -1,
-        closedPitch: envelope.sepalClosedPitch + (i % 2) * 0.04,
-        openPitch: envelope.sepalOpenPitch + (i % 2) * 0.05,
+        normalizedRank: isOuterCalyxRing ? -1.0 : -0.5,
+        closedPitch: envelope.sepalClosedPitch + (isOuterCalyxRing ? 0.07 : 0),
+        openPitch: envelope.sepalOpenPitch + (isOuterCalyxRing ? 0.08 : 0),
         baseYaw,
         baseRoll,
-        naturalScaleX: 0.96 + (i % 2) * 0.08,
-        naturalScaleY: 0.96 + ((i + 1) % 2) * 0.06,
+        naturalScaleX: isOuterCalyxRing ? 1.02 : 0.94,
+        naturalScaleY: isOuterCalyxRing ? 1.0 : 0.95,
         phaseOffset: i * 0.7,
       });
     }
@@ -2382,10 +2398,10 @@ export class ProceduralFlowerModel extends THREE.Group {
             : 0.18;
     const recurve =
       morph === 'peony-ruffled'
-        ? 0.26
+        ? 0.24
         : morph === 'camellia-fibonacci'
-          ? 0.14
-          : 0.2;
+          ? 0.12
+          : 0.18;
 
     const tierSamples = [0.12, 0.24, 0.38, 0.52, 0.66, 0.78, 0.9, 1.0];
     const tierGeometries = tierSamples.map((tierT, idx) => {
@@ -2396,9 +2412,9 @@ export class ProceduralFlowerModel extends THREE.Group {
       const widScale =
         morph === 'sunflower-capitulum'
           ? 0.88 + 0.2 * tierT
-          : 0.78 + 0.3 * tierT;
+          : 0.76 + 0.28 * tierT;
       const aoFactor = 0.48 - tierT * 0.18;
-      const tierCup = this.spec.cupDepth * (1.18 - tierT * 0.28);
+      const tierCup = this.spec.cupDepth * (1.12 - tierT * 0.24);
       const tierRecurve = recurve * Math.pow(tierT, 1.35);
       const notchDepth =
         morph === 'sunflower-capitulum'
@@ -2427,21 +2443,22 @@ export class ProceduralFlowerModel extends THREE.Group {
     // For Sunflower capitulum, ray florets attach strictly around the outer rim of the seed disc
     const minR =
       morph === 'sunflower-capitulum'
-        ? envelope.coreMaxRadius * 0.88
+        ? envelope.coreMaxRadius * 0.92
         : envelope.petalMinRadius;
     const maxR =
       morph === 'sunflower-capitulum'
-        ? envelope.coreMaxRadius * 1.04
+        ? envelope.coreMaxRadius * 1.05
         : envelope.petalMaxRadius;
 
     for (let i = 0; i < totalPetals; i++) {
       const rank01 = i / Math.max(1, totalPetals - 1);
-      const yawJitter = organicNoise(i * 3.73) * 0.036;
+      const yawJitter = organicNoise(i * 3.73) * 0.024;
       const yaw =
         morph === 'sunflower-capitulum'
           ? (i / totalPetals) * Math.PI * 2 + (i % 2) * 0.055 + yawJitter * 0.5
           : i * GOLDEN_ANGLE + yawJitter;
-      const r = minR + (maxR - minR) * Math.pow(rank01, 0.9);
+      // Strictly linear radial shell progression guarantees constant inter-layer clearance at bloom = 0%
+      const r = minR + (maxR - minR) * rank01;
       const yOffset =
         morph === 'sunflower-capitulum'
           ? 0.028 - rank01 * 0.008
@@ -2457,15 +2474,15 @@ export class ProceduralFlowerModel extends THREE.Group {
       const pivot = new THREE.Group();
       pivot.position.set(Math.cos(yaw) * r, yOffset, Math.sin(yaw) * r);
       const baseYaw = -yaw - Math.PI / 2;
-      const baseRoll = organicNoise(i * 6.17) * 0.085;
-      const naturalScaleX = 0.93 + organicNoise(i * 9.41) * 0.08;
-      const naturalScaleY = 0.95 + organicNoise(i * 4.83) * 0.06;
+      const baseRoll = organicNoise(i * 6.17) * 0.065;
+      const naturalScaleX = 0.94 + organicNoise(i * 9.41) * 0.06;
+      const naturalScaleY = 0.96 + organicNoise(i * 4.83) * 0.05;
       pivot.rotation.y = baseYaw;
 
       const mesh = new THREE.Mesh(geo, petalMaterial);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      mesh.rotation.z = baseRoll;
+      mesh.rotation.z = 0;
       pivot.add(mesh);
       this.flowerHeadGroup.add(pivot);
 
@@ -2476,12 +2493,11 @@ export class ProceduralFlowerModel extends THREE.Group {
           rank01;
       const openPitch =
         morph === 'sunflower-capitulum'
-          ? 1.38 + rank01 * 0.24 + organicNoise(i * 2.53) * 0.03
+          ? 1.38 + rank01 * 0.24
           : envelope.petalOpenPitchRange[0] +
             (envelope.petalOpenPitchRange[1] -
               envelope.petalOpenPitchRange[0]) *
-              Math.pow(rank01, 1.05) +
-            organicNoise(i * 2.53) * 0.038;
+              Math.pow(rank01, 1.02);
 
       this.petalPivots.push({
         pivot,
@@ -2501,28 +2517,28 @@ export class ProceduralFlowerModel extends THREE.Group {
   private buildLilyWhorls(petalMaterial: THREE.MeshPhysicalMaterial): void {
     const geoInner = createSculptedPetalGeometry(
       this.spec.petalLength * 0.96,
-      this.spec.petalWidth * 1.12,
-      0.18,
+      this.spec.petalWidth * 1.08,
+      0.16,
       this.spec.ruffleFrequency,
-      this.spec.ruffleAmplitude * 1.25,
+      this.spec.ruffleAmplitude * 1.15,
       0,
       0.54,
       0.26,
-      0.26,
+      0.22,
       0.48,
       0,
       0.4,
     );
     const geoOuter = createSculptedPetalGeometry(
-      this.spec.petalLength * 1.04,
-      this.spec.petalWidth * 0.98,
-      0.16,
+      this.spec.petalLength * 1.02,
+      this.spec.petalWidth * 0.96,
+      0.15,
       this.spec.ruffleFrequency,
       this.spec.ruffleAmplitude,
       0,
       0.52,
       0.24,
-      0.28,
+      0.24,
       0.45,
       0,
       1.3,
@@ -2534,12 +2550,12 @@ export class ProceduralFlowerModel extends THREE.Group {
       const isOuter = ring === 1;
       for (let i = 0; i < count; i++) {
         const yaw = (i / count) * Math.PI * 2 + ring * (Math.PI / 3);
-        const r = isOuter ? 0.044 : 0.032;
-        const y = isOuter ? 0.018 : 0.028;
+        const r = isOuter ? 0.048 : 0.034;
+        const y = isOuter ? 0.018 : 0.026;
         const pivot = new THREE.Group();
         pivot.position.set(Math.cos(yaw) * r, y, Math.sin(yaw) * r);
         const baseYaw = -yaw - Math.PI / 2;
-        const baseRoll = organicNoise((ring * 3 + i) * 4.2) * 0.06;
+        const baseRoll = organicNoise((ring * 3 + i) * 4.2) * 0.05;
         pivot.rotation.y = baseYaw;
 
         const mesh = new THREE.Mesh(
@@ -2548,20 +2564,20 @@ export class ProceduralFlowerModel extends THREE.Group {
         );
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        mesh.rotation.z = baseRoll;
+        mesh.rotation.z = 0;
         pivot.add(mesh);
         this.flowerHeadGroup.add(pivot);
 
         this.petalPivots.push({
           pivot,
           mesh,
-          normalizedRank: isOuter ? 0.88 : 0.38,
-          closedPitch: isOuter ? 0.3 : 0.16,
+          normalizedRank: isOuter ? 0.88 : 0.34,
+          closedPitch: isOuter ? 0.34 : 0.18,
           openPitch: this.spec.maxOpenAngleRad * (isOuter ? 0.98 : 0.82),
           baseYaw,
           baseRoll,
-          naturalScaleX: 0.96 + organicNoise(i * 5.1) * 0.05,
-          naturalScaleY: 0.97 + organicNoise(i * 7.7) * 0.04,
+          naturalScaleX: 0.96 + organicNoise(i * 5.1) * 0.04,
+          naturalScaleY: 0.97 + organicNoise(i * 7.7) * 0.03,
           phaseOffset: i * 0.7 + ring,
         });
       }
@@ -2576,27 +2592,27 @@ export class ProceduralFlowerModel extends THREE.Group {
     const sepalGeo = createSculptedPetalGeometry(
       0.255,
       0.132,
-      0.16,
+      0.15,
       1.8,
-      0.0045,
+      0.004,
       0,
       0.58,
       0.26,
-      0.14,
+      0.12,
       0.68,
       0,
       0.3,
     );
     const wingGeo = createSculptedPetalGeometry(
       0.275,
-      0.228,
-      0.2,
+      0.218,
+      0.18,
       2.6,
-      0.0075,
+      0.0065,
       0.015,
       0.7,
       0.24,
-      0.12,
+      0.1,
       0.92,
       0,
       1.1,
@@ -2604,10 +2620,10 @@ export class ProceduralFlowerModel extends THREE.Group {
     // Mid-lobe of the trilobed labellum (蝴蝶兰中央舌瓣)
     const lipMidGeo = createSculptedPetalGeometry(
       0.185,
-      0.138,
-      0.28,
+      0.132,
+      0.22,
       3.4,
-      0.008,
+      0.007,
       0.1,
       0.72,
       0.22,
@@ -2618,15 +2634,15 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
     // Lateral side-lobes of the trilobed labellum (两侧向上包拢合蕊柱的侧裂片)
     const lipSideLobeGeo = createSculptedPetalGeometry(
-      0.115,
-      0.072,
-      0.3,
+      0.112,
+      0.068,
+      0.22,
       2.0,
-      0.004,
+      0.0035,
       0,
       0.66,
       0.24,
-      -0.12,
+      -0.06,
       0.86,
       0,
       0.8,
@@ -2671,10 +2687,11 @@ export class ProceduralFlowerModel extends THREE.Group {
     this.meshMaterialsForMode.push(lipMat);
 
     // 1 Dorsal Sepal (top/back: Math.PI * 1.5) + 2 Lateral Sepals (lower-front left/right: Math.PI * 0.28 & Math.PI * 0.72)
+    // Outer orchid whorl: r = 0.050, closedPitch = 0.40
     const sepalAngles = [Math.PI * 1.5, Math.PI * 0.28, Math.PI * 0.72];
     sepalAngles.forEach((yaw, i) => {
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.038, 0.016, Math.sin(yaw) * 0.038);
+      pivot.position.set(Math.cos(yaw) * 0.05, 0.016, Math.sin(yaw) * 0.05);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
       const mesh = new THREE.Mesh(sepalGeo, petalMaterial);
@@ -2686,21 +2703,21 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: 0.88,
-        closedPitch: 0.32,
+        closedPitch: 0.4,
         openPitch: i === 0 ? 1.32 : 1.44,
         baseYaw,
-        baseRoll: organicNoise(i * 3.1) * 0.05,
+        baseRoll: organicNoise(i * 3.1) * 0.04,
         naturalScaleX: 1.0,
         naturalScaleY: 1.0,
         phaseOffset: i,
       });
     });
 
-    // 2 Broad Lateral Wing Petals (宽展蝶翼侧花瓣)
+    // 2 Broad Lateral Wing Petals (宽展蝶翼侧花瓣): Middle orchid whorl r = 0.041, closedPitch = 0.30
     const wingAngles = [-0.06, Math.PI + 0.06];
     wingAngles.forEach((yaw, i) => {
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.032, 0.024, Math.sin(yaw) * 0.032);
+      pivot.position.set(Math.cos(yaw) * 0.041, 0.023, Math.sin(yaw) * 0.041);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
       const mesh = new THREE.Mesh(wingGeo, petalMaterial);
@@ -2712,21 +2729,25 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: 0.52,
-        closedPitch: 0.22,
+        closedPitch: 0.3,
         openPitch: 1.22,
         baseYaw,
-        baseRoll: (i === 0 ? 1 : -1) * 0.06,
+        baseRoll: (i === 0 ? 1 : -1) * 0.05,
         naturalScaleX: 1.0,
         naturalScaleY: 1.0,
         phaseOffset: i + 2,
       });
     });
 
-    // 2 Upturned Lateral Lip Lobes framing the arcuate Gynostemium column at the front (+Z)
+    // 2 Upturned Lateral Lip Lobes framing the arcuate Gynostemium column: Innermost whorl r = 0.028, closedPitch = 0.16
     for (const side of [-1, 1]) {
       const sideYaw = Math.PI * 0.5 + side * 0.42;
       const sidePivot = new THREE.Group();
-      sidePivot.position.set(side * 0.02, 0.026, 0.026);
+      sidePivot.position.set(
+        Math.cos(sideYaw) * 0.028,
+        0.028,
+        Math.sin(sideYaw) * 0.028,
+      );
       const baseYaw = -sideYaw - Math.PI / 2;
       sidePivot.rotation.y = baseYaw;
       const sideMesh = new THREE.Mesh(lipSideLobeGeo, lipMat);
@@ -2736,20 +2757,20 @@ export class ProceduralFlowerModel extends THREE.Group {
       this.petalPivots.push({
         pivot: sidePivot,
         mesh: sideMesh,
-        normalizedRank: 0.22,
-        closedPitch: 0.14,
+        normalizedRank: 0.18,
+        closedPitch: 0.16,
         openPitch: 0.64,
         baseYaw,
-        baseRoll: side * 0.18,
+        baseRoll: side * 0.14,
         naturalScaleX: 1.0,
         naturalScaleY: 1.0,
         phaseOffset: 5 + side,
       });
     }
 
-    // Central Mid-Lobe of Labellum projecting forward (+Z) at yaw = Math.PI * 0.5 (baseYaw = -Math.PI)
+    // Central Mid-Lobe of Labellum projecting forward (+Z) at yaw = Math.PI * 0.5: Inner whorl r = 0.034, closedPitch = 0.22
     const lipPivot = new THREE.Group();
-    lipPivot.position.set(0, 0.02, 0.036);
+    lipPivot.position.set(0, 0.022, 0.034);
     const lipBaseYaw = -Math.PI;
     lipPivot.rotation.y = lipBaseYaw;
     const lipMesh = new THREE.Mesh(lipMidGeo, lipMat);
@@ -2776,7 +2797,7 @@ export class ProceduralFlowerModel extends THREE.Group {
       pivot: lipPivot,
       mesh: lipMesh,
       normalizedRank: 0.28,
-      closedPitch: 0.16,
+      closedPitch: 0.22,
       openPitch: 1.24,
       baseYaw: lipBaseYaw,
       baseRoll: 0,
@@ -2789,26 +2810,26 @@ export class ProceduralFlowerModel extends THREE.Group {
   private buildIrisCorolla(petalMaterial: THREE.MeshPhysicalMaterial): void {
     // 1. Drooping Outer Falls (下垂反卷金须垂瓣)
     const fallGeo = createSculptedPetalGeometry(
-      0.265,
-      0.158,
-      0.20,
-      3.8,
-      0.008,
+      0.262,
+      0.152,
+      0.18,
+      3.6,
+      0.007,
       0.02,
       0.66,
       0.26,
-      0.24,
+      0.22,
       0.86,
       0,
       0.6,
     );
     // 2. Upright Vaulted Standards (直立拱冠旗瓣: clean 0.06 outward flare so the 3 standards never cross or clump)
     const standardGeo = createSculptedPetalGeometry(
-      0.238,
-      0.128,
-      0.16,
-      3.2,
-      0.006,
+      0.235,
+      0.124,
+      0.15,
+      3.0,
+      0.0055,
       0.02,
       0.62,
       0.22,
@@ -2819,15 +2840,15 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
     // 3. Overarching Bifid Style Arms (花柱分枝)
     const styleArmGeo = createSculptedPetalGeometry(
-      0.135,
-      0.048,
-      0.16,
+      0.132,
+      0.046,
+      0.14,
       1.5,
-      0.0025,
+      0.0022,
       0.06,
       0.55,
       0.22,
-      0.14,
+      0.12,
       0.62,
     );
 
@@ -2847,10 +2868,12 @@ export class ProceduralFlowerModel extends THREE.Group {
     );
     this.materialsToDispose.push(beardMat);
 
+    // Strictly nested Iris shells:
+    // Standards (r=0.033, closedPitch=0.18) < Style Arms (r=0.041, closedPitch=0.28) < Falls (r=0.051, closedPitch=0.40) < Calyx Bracts (r=0.067, closedPitch=0.58)
     for (let i = 0; i < 3; i++) {
       const yaw = (i / 3) * Math.PI * 2;
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.048, 0.018, Math.sin(yaw) * 0.048);
+      pivot.position.set(Math.cos(yaw) * 0.051, 0.016, Math.sin(yaw) * 0.051);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
 
@@ -2880,7 +2903,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: 0.88,
-        closedPitch: 0.24,
+        closedPitch: 0.40,
         openPitch: 1.08,
         baseYaw,
         baseRoll: organicNoise(i * 4.1) * 0.04,
@@ -2891,9 +2914,9 @@ export class ProceduralFlowerModel extends THREE.Group {
 
       const stylePivot = new THREE.Group();
       stylePivot.position.set(
-        Math.cos(yaw) * 0.026,
-        0.032,
-        Math.sin(yaw) * 0.026,
+        Math.cos(yaw) * 0.041,
+        0.024,
+        Math.sin(yaw) * 0.041,
       );
       stylePivot.rotation.y = baseYaw;
       const styleMesh = new THREE.Mesh(styleArmGeo, petalMaterial);
@@ -2904,8 +2927,8 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot: stylePivot,
         mesh: styleMesh,
         normalizedRank: 0.52,
-        closedPitch: 0.20,
-        openPitch: 0.82,
+        closedPitch: 0.28,
+        openPitch: 0.80,
         baseYaw,
         baseRoll: 0,
         naturalScaleX: 1.0,
@@ -2918,7 +2941,7 @@ export class ProceduralFlowerModel extends THREE.Group {
     for (let i = 0; i < 3; i++) {
       const yaw = (i / 3) * Math.PI * 2 + Math.PI / 3;
       const pivot = new THREE.Group();
-      pivot.position.set(Math.cos(yaw) * 0.038, 0.030, Math.sin(yaw) * 0.038);
+      pivot.position.set(Math.cos(yaw) * 0.033, 0.029, Math.sin(yaw) * 0.033);
       const baseYaw = -yaw - Math.PI / 2;
       pivot.rotation.y = baseYaw;
 
@@ -2932,7 +2955,7 @@ export class ProceduralFlowerModel extends THREE.Group {
         pivot,
         mesh,
         normalizedRank: 0.24,
-        closedPitch: 0.14,
+        closedPitch: 0.18,
         openPitch: 0.58,
         baseYaw,
         baseRoll: organicNoise((i + 3) * 3.7) * 0.03,
@@ -3544,7 +3567,10 @@ export class ProceduralFlowerModel extends THREE.Group {
       aMat.emissiveIntensity = 0.03 + bloomDetails.antherDehiscenceGlow * 0.11;
     }
 
-    this.flowerHeadGroup.position.set(0, 0.045, 0);
+    // Whole-head physiological breathing lift & gentle sway
+    const headBreathLift =
+      Math.sin(elapsedSec * 1.48) * 0.0035 * damping.splatKineticCompression;
+    this.flowerHeadGroup.position.set(0, 0.045 + headBreathLift, 0);
     this.flowerHeadGroup.rotation.x =
       0.16 +
       (Math.cos(elapsedSec * 1.15) * 0.015 +
@@ -3556,85 +3582,52 @@ export class ProceduralFlowerModel extends THREE.Group {
       damping.splatKineticCompression;
 
     this.coreGlowLight.intensity =
-      0.05 + Math.pow(b, 1.1) * (0.06 + 0.015 * Math.sin(elapsedSec * 2.2));
+      0.05 +
+      Math.pow(b, 1.1) *
+        (0.06 + 0.018 * Math.sin(elapsedSec * 1.48));
 
-    // 1. Main Corolla Petals & Calyx Sepals: Multi-stage cascading radial wave + tip uncurling + breathing
+    // 1. Main Corolla Petals & Calyx Sepals: Non-intersecting concentric bud-to-bloom interpolation + living breathing
     const kineticDamp = damping.splatKineticCompression;
     for (const item of this.petalPivots) {
-      const basePitch = evaluateOrganPitchAtBloom(
-        item.closedPitch,
-        item.openPitch,
-        item.normalizedRank,
-        b,
-      );
-      const rankDelay = Math.max(0, item.normalizedRank) * 2.4;
-      const primaryFlutter =
-        Math.sin(elapsedSec * 1.95 - rankDelay + item.phaseOffset) *
-        0.028 *
-        (0.25 + 0.75 * b) *
-        kineticDamp;
-      const secondaryHarmonic =
-        Math.cos(elapsedSec * 3.3 + item.phaseOffset * 1.7) *
-        0.01 *
-        (0.2 + 0.8 * b) *
-        kineticDamp;
+      const pose = evaluateOrganBudToBloomPose({
+        closedPitch: item.closedPitch,
+        openPitch: item.openPitch,
+        normalizedRank: item.normalizedRank,
+        bloom01: b,
+        elapsedSec,
+        phaseOffset: item.phaseOffset,
+        naturalScaleX: item.naturalScaleX,
+        naturalScaleY: item.naturalScaleY,
+        baseYaw: item.baseYaw,
+        baseRoll: item.baseRoll,
+        kineticDamping01: kineticDamp,
+      });
 
-      item.mesh.rotation.x = -(basePitch + primaryFlutter + secondaryHarmonic);
-
-      const rollWave =
-        Math.sin(elapsedSec * 1.65 + item.phaseOffset * 1.3 - rankDelay * 0.5) *
-        0.024 *
-        (0.2 + 0.8 * b) *
-        kineticDamp;
-      item.mesh.rotation.z = item.baseRoll * (0.4 + 0.6 * b) + rollWave;
-
-      if (item.normalizedRank >= 0) {
-        const breathCupFlex =
-          1.0 +
-          Math.sin(elapsedSec * 1.95 - rankDelay + item.phaseOffset) *
-            0.035 *
-            b *
-            kineticDamp;
-        // At b=0, petals cup gently (1.12) to clasp the bud; as b->1, blade flattens & marginal ruffles expand
-        const budCupScaleZ = (1.12 - 0.14 * b) * breathCupFlex;
-        const budWidthScaleX =
-          (0.88 + 0.12 * bloomDetails.marginRuffleExpansion) *
-          item.naturalScaleX;
-        const budLengthScaleY =
-          (0.94 + 0.06 * Math.sin(b * Math.PI * 0.5)) * item.naturalScaleY;
-        item.mesh.scale.set(
-          budWidthScaleX,
-          budLengthScaleY,
-          budCupScaleZ,
-        );
-      }
-
-      const spiralTwist =
-        item.normalizedRank >= 0 ? (1 - b) * 0.24 * item.normalizedRank : 0;
-      const azimuthSway =
-        Math.cos(elapsedSec * 1.4 + item.phaseOffset) * 0.014 * b * kineticDamp;
-      item.pivot.rotation.y = item.baseYaw + spiralTwist + azimuthSway;
+      item.mesh.rotation.x = -pose.pitchRad;
+      item.mesh.rotation.z = pose.rollRad;
+      item.mesh.scale.set(pose.scaleX, pose.scaleY, pose.scaleZ);
+      item.pivot.rotation.y = pose.yawRad;
     }
 
-    // 2. Companion Side Bud Petals
+    // 2. Companion Side Bud Petals (synchronized breathing & non-intersecting cupped pose)
     for (const budItem of this.companionBudPivots) {
-      const budPitch = evaluateOrganPitchAtBloom(
-        budItem.closedPitch,
-        budItem.openPitch,
-        budItem.normalizedRank,
-        b * 0.85,
-      );
-      const flutter =
-        Math.sin(elapsedSec * 2.25 + budItem.phaseOffset) *
-        0.022 *
-        (0.25 + 0.75 * b) *
-        kineticDamp;
-      budItem.mesh.rotation.x = -(budPitch + flutter);
-      budItem.mesh.rotation.z =
-        budItem.baseRoll +
-        Math.cos(elapsedSec * 1.8 + budItem.phaseOffset) * 0.016 * b * kineticDamp;
-      const twist = (1 - b) * 0.18 * budItem.normalizedRank;
-      budItem.pivot.rotation.y = budItem.baseYaw + twist;
+      const budPose = evaluateOrganBudToBloomPose({
+        closedPitch: budItem.closedPitch,
+        openPitch: budItem.openPitch,
+        normalizedRank: budItem.normalizedRank,
+        bloom01: b * 0.85,
+        elapsedSec,
+        phaseOffset: budItem.phaseOffset,
+        naturalScaleX: budItem.naturalScaleX,
+        naturalScaleY: budItem.naturalScaleY,
+        baseYaw: budItem.baseYaw,
+        baseRoll: budItem.baseRoll,
+        kineticDamping01: kineticDamp,
+      });
+      budItem.mesh.rotation.x = -budPose.pitchRad;
+      budItem.mesh.rotation.z = budPose.rollRad;
+      budItem.mesh.scale.set(budPose.scaleX, budPose.scaleY, budPose.scaleZ);
+      budItem.pivot.rotation.y = budPose.yawRad;
     }
 
     // 3. Stamens: Cascading Fibonacci spiral uncurl from outer ring to inner heart
